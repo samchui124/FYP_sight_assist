@@ -1,0 +1,122 @@
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts" / "pipeline"))
+
+from stage3_arbitrate import area, build_priority, resolve_conflicts  # noqa: E402
+
+
+@pytest.fixture(scope="module")
+def tax():
+    from label_taxonomy import LabelTaxonomy
+
+    return LabelTaxonomy()
+
+
+def _det(cid: int, bbox, conf: float = 0.5, **kw) -> dict:
+    return {"class_id": cid, "bbox": list(bbox), "conf": conf, **kw}
+
+
+# ---- 面积 ----
+
+def test_area_of_unit_box():
+    assert area([0.0, 0.0, 1.0, 1.0]) == pytest.approx(1.0)
+
+
+def test_area_of_degenerate_box_is_zero():
+    assert area([0.5, 0.5, 0.5, 0.5]) == 0.0
+
+
+# ---- 优先级 ----
+
+def test_pedestrian_ranks_below_static_facilities(tax):
+    """行人（移动障碍）优先级低于静止设施——设施位置稳定，对导航更有用。"""
+    prio = build_priority(tax)
+    pid = next(c["id"] for c in tax.classes if c["name_en"] == "pedestrian")
+    for n in ("bin", "bollard", "elevator", "stairs"):
+        cid = next(c["id"] for c in tax.classes if c["name_en"] == n)
+        assert prio[cid] < prio[pid], n
+
+
+def test_no_name_based_special_cases_for_deleted_classes(tax):
+    """v3 删掉 ambiguous_vertical 后，它的 95 分兜底规则不该留下残迹。
+
+    更重要的一条：**写死 `name_en == ...` 的分支在类被删或改名后会静默失效**。
+    v3 就是这样无声丢掉一条规则的——没有报错，只是行为变了。
+    所以特殊优先级一律走 `configs/classes.json` 的 `arbitration_priority` 字段，
+    这里断言「所有特例都来自显式字段，除了 pedestrian 那一条」。
+    """
+    prio = build_priority(tax)
+    declared = {c["id"] for c in tax.classes if c.get("arbitration_priority") is not None}
+    pid = next(c["id"] for c in tax.classes if c["name_en"] == "pedestrian")
+    off_default = {cid for cid, v in prio.items() if v != 10}
+    assert off_default == declared | {pid}, (
+        "出现了一个既没有 arbitration_priority、也不是 pedestrian 的特殊优先级："
+        f"{sorted(off_default - declared - {pid})}")
+    assert all(c["name_en"] != "ambiguous_vertical" for c in tax.classes)
+
+
+def test_umbrella_class_removed_from_taxonomy(tax):
+    """v2 起伞类 street_obstacle 已删除，其内容拆为具体类。"""
+    assert "street_obstacle" not in [c["name_en"] for c in tax.classes]
+
+
+# ---- 冲突消解 ----
+
+def test_non_overlapping_boxes_all_kept(tax):
+    prio = build_priority(tax)
+    dets = [_det(3, [0.0, 0.0, 0.2, 0.2]), _det(17, [0.5, 0.5, 0.7, 0.7])]
+    kept, merged = resolve_conflicts(dets, prio, 0.55)
+    assert len(kept) == 2 and not merged
+
+
+def test_same_class_overlapping_boxes_are_not_deduped_here(tax):
+    """类内重复由第一段的类内 NMS 处理，本段只管跨类。"""
+    prio = build_priority(tax)
+    dets = [_det(3, [0.0, 0.0, 0.4, 0.4]), _det(3, [0.02, 0.02, 0.42, 0.42])]
+    kept, merged = resolve_conflicts(dets, prio, 0.55)
+    assert len(kept) == 2 and not merged
+
+
+def test_cross_class_overlap_keeps_static_facility_over_pedestrian(tax):
+    """elevator(3) 与 pedestrian(6) 重叠时保留 elevator——静止设施更有导航价值。"""
+    prio = build_priority(tax)
+    box = [0.1, 0.1, 0.4, 0.5]
+    dets = [_det(6, box, 0.9), _det(3, box, 0.3)]
+    kept, merged = resolve_conflicts(dets, prio, 0.55)
+    assert len(kept) == 1
+    assert kept[0]["class_id"] == 3, "应保留静止设施，尽管它置信度更低"
+    assert len(merged) == 1
+    assert merged[0]["merged_into_class"] == 3
+
+
+def test_conflict_iou_recorded(tax):
+    prio = build_priority(tax)
+    dets = [_det(3, [0.0, 0.0, 0.4, 0.4]), _det(6, [0.0, 0.0, 0.4, 0.4])]
+    _, merged = resolve_conflicts(dets, prio, 0.55)
+    assert merged and merged[0]["conflict_iou"] == pytest.approx(1.0)
+
+
+def test_below_iou_threshold_not_merged(tax):
+    prio = build_priority(tax)
+    # IoU = 0.2/0.6 ~= 0.33 < 0.55
+    dets = [_det(3, [0.0, 0.0, 0.4, 0.5]), _det(6, [0.2, 0.0, 0.6, 0.5])]
+    kept, merged = resolve_conflicts(dets, prio, 0.55)
+    assert len(kept) == 2 and not merged
+
+
+def test_same_class_higher_conf_wins_among_equals(tax):
+    """优先级相同时按置信度降序，保留高置信度者。"""
+    prio = build_priority(tax)
+    box = [0.1, 0.1, 0.4, 0.4]
+    dets = [_det(1, box, 0.3), _det(8, box, 0.8)]  # stairs vs step，优先级相同
+    kept, _ = resolve_conflicts(dets, prio, 0.55)
+    assert len(kept) == 1
+    assert kept[0]["conf"] == 0.8
+
+
+def test_empty_input():
+    kept, merged = resolve_conflicts([], {}, 0.55)
+    assert kept == [] and merged == []

@@ -1,0 +1,171 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# 包管理与构建缓存（均重定向到工作区内，避免沙箱外的写入限制）
+.uv-cache/
+.ultralytics-config/
+.mpl-cache/
+# transformers trust_remote_code 下载的模型代码（可重新下载，不入库）
+.hf/
+.tmp/
+build/
+dist/
+
+# 数据（体积大，不入库；raw/ 与 dataset/ 由外部备份盘维护）
+# 注意：用 `dir/*` 而非 `dir/**`，否则父目录被整体排除后，
+#       `!.../file` 无法重新包含其中的文件（git 的目录排除优先规则）。
+data/raw/*/**
+data/frames/*/**
+data/dataset/images/*/**
+data/dataset/labels/*/**
+data/dataset/_duplicates/*/**
+data/dataset/_smoke/*/**
+data/logos/*/**
+!data/**/.gitkeep
+
+# 例外：**小体积、高价值、不可再生**的资产必须入库
+#  - 标注文件（几十 KB）：标注成果，重跑成本高
+#  - 署名文件（几百 KB）：CC BY/SA 许可要求，丢了无法补
+# 写法要点：用 `dir/*/` 只排除**子目录**（图片），不排除该层目录本身；
+#          若写成 `dir/**` 连目录一起排除，下面的 `!` 就失效了（实测踩过）。
+data/raw/external/*/**
+!data/raw/external/attribution.jsonl
+!data/dataset/labels/**
+
+# ⚠️ 但**第三方数据集的标签绝不入库**。
+# 上面那条 `!data/dataset/labels/**` 是为了保住**我们自己的**标注成果，
+# 它是「整个目录全放行」，所以第三方数据一落进来就会被一起放行。
+# 实测踩过：导入 Roboflow 的 7261 张图后，`git add -A` 把 7261 个
+# **别人的标注文件**也提交了进去（commit 2014788）。
+# 那既是许可问题（不该把别人的标注重新分发），也是仓库体积问题。
+# 规则顺序：后面的规则覆盖前面的，所以这条要写在那条放行规则**之后**。
+data/dataset/labels/roboflow_people_v1/**
+
+# 探测（spike）素材：Commons 图片是 CC 授权的第三方资源，不入库。
+# 保留结论文档与脚本；图像与署名清单可按 fetch_commons.py 重新拉取。
+data/probe/hk/**
+data/probe/hk_onsite/**
+data/probe/streetview/**
+data/probe/report.json
+data/discover/**/overlay/**
+!data/probe/**/.gitkeep
+!data/probe/FINDINGS.md
+!data/probe/README.md
+
+# 自动预标的中间产物与评估输出（体量大、可重跑生成）
+data/auto/**
+data/eval/**
+!data/auto/.gitkeep
+!data/eval/.gitkeep
+
+# 自动预标产出的训练数据集（由 auto_annotate.py --dataset 生成）
+data/dataset_*_demo/**
+data/_ablation_pre_review/**
+data/dataset_*/images/**
+data/dataset_*/labels/**
+# 上面两条只挡了图与标签，剩下的元数据（dataset.yaml / classes.json / rename_map.csv）
+# 仍会以「未跟踪目录」的形式冒出来。这些是**派生数据**，一条命令即可重建，
+# 且 yaml 里写的是本机绝对路径，入库没有意义。
+# 注意用 `dataset_*`（带下划线）以免连带挡掉主数据集 data/dataset/。
+data/dataset_*/**
+
+# 由源码 zip 手动安装的 CLIP 源码（见 scripts/env_setup.py 注释）
+vendor/
+
+# 由流水线重新生成的派生产物（且当前内容来自合成数据，不应入库）
+data/dataset/manifest.csv
+data/dataset/split.json
+data/dataset/dataset_report.md
+data/dataset/train.txt
+data/dataset/val.txt
+data/dataset/test.txt
+data/dataset/route_B.txt
+data/dataset/**/*.cache
+datasets/pathguide.yaml
+
+# Ultralytics 误写在仓库根的缓存
+/images.cache*
+/Ultralytics/
+
+# 训练产物与模型权重
+runs/**
+weights/
+*.pt
+*.onnx
+*.tflite
+# 例外：App 要用的那个检测模型必须入库。
+# 它是「端侧推理能否跑通」的产物，重新导出要装一整套 TensorFlow 依赖链
+# （见 scripts/setup_export_env.ps1），不该让克隆仓库的人再走一遍。
+# 注意：被排除的目录里的文件无法用 ! 重新包含，所以这里只对具体文件放行，
+# 且父目录 app/assets/models/ 没有被 * 规则整目录排除。
+!app/assets/models/detector.tflite
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# Obsidian：忽略机器相关的界面与工作区状态，保留笔记正文与核心配置
+# 仓库根曾被当作 vault 打开，留下了一套冗余配置，一并忽略
+/.obsidian/
+Accessible Visual Guidance Note/.obsidian/workspace*.json
+Accessible Visual Guidance Note/.obsidian/cache/
+.trash/
+
+# 密钥文件（绝不入库）
+.env.secret.ps1
+.env.local
+.env.*.local
+*.secret
+credentials.json
+service-account*.json
+# 注：仓库内的 .env.ps1 已改为不含密钥且可安全提交的版本；
+#     若你本地在 .env.ps1 里直接写了 key，请改用 .env.secret.ps1。
+
+# 临时
+*.tmp
+~$*
+# 分析与排查用的一次性脚本（在仓库根目录创建，用完即删）。
+# 曾经误提交过一个（.tmp_v3.py），故加规则。
+/.tmp_*.py
+/.tmp_*.txt
+/.tmp_*.ps1
+
+# 提交信息临时文件（`git commit -F` 用；曾被误提交一次，故加规则）
+/msg-*.txt
+/commitmsg.txt
+/commit-msg.txt
+
+# X-AnyLabeling
+# 它默认写 ~/.anylabelingrc（工作区外，受限环境被拒），需用 --config 指到工作区内。
+.anylabelingrc
+.anylabeling_labels.txt
+# 人工复核用的试跑目录（由 to_xanylabeling.py 生成，可重复生成）
+data/xtest/**
+
+# 工具链
+# Flutter SDK（1.9GB）与 Flutter/Gradle/pub 的缓存都在这里。
+# 执行沙箱禁止写入工作区外，所以它们只能落在此处；**绝不能入库**。
+.tools/
+
+# TFLite 导出专用环境。
+# 导出链（onnx2tf + TF 2.19）与训练链（ultralytics + torch）依赖冲突，必须分开；
+# 见 scripts/setup_export_env.ps1 的说明。
+.venv-export/
+# onnx2tf 留在仓库根的校准数据（每次导出会重新下载）
+calibration_image_sample_data_*.npy*
+
+# 终端输出转存（排查用，不入库）
+/test.txt
+/analyze.txt
+/run_log.txt
+/flutter_*.log
+
+# 真机验证产物（截图、logcat 转存、构建日志）。
+# 每次验证都会重新生成，体积不小，不入库；脚本 verify_on_device.ps1 会重建它。
+/artifacts/
+/gradle_log.txt

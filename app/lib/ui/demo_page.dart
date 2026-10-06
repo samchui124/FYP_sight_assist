@@ -46,9 +46,7 @@ class _DemoPageState extends State<DemoPage> {
 
   StreamSubscription<VisionFrame>? _sub;
 
-  SourceMode _mode = kIsWeb || defaultTargetPlatform == TargetPlatform.iOS
-      ? SourceMode.mock
-      : SourceMode.camera;
+  SourceMode _mode = kIsWeb ? SourceMode.mock : SourceMode.camera;
 
   /// **界面唯一持有的检测来源。**
   ///
@@ -133,7 +131,12 @@ class _DemoPageState extends State<DemoPage> {
   VisionSource _makeSource(SourceMode mode) {
     switch (mode) {
       case SourceMode.camera:
-        return kIsWeb ? WebVisionSource() : PlatformVision();
+        return kIsWeb
+          ? WebVisionSource()
+          : PlatformVision(
+            rotationDegrees:
+              defaultTargetPlatform == TargetPlatform.iOS ? 0 : 90,
+            );
       case SourceMode.mock:
         // 假源的原始帧尺寸与旋转角与相机实现保持一致，
         // 这样「假数据下框画对了」才能推出「相机下也会画对」。
@@ -187,7 +190,7 @@ class _DemoPageState extends State<DemoPage> {
             (kIsWeb || defaultTargetPlatform == TargetPlatform.iOS)
           ? kIsWeb
               ? '模拟画面：选择“相机”以开始实时识别'
-            : 'iOS 模拟预览：实时相机识别尚未接入'
+            : '模拟画面：选择“相机”以开始实时识别'
           : status.message;
       _statusError = status.error;
     });

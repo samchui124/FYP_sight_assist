@@ -44,6 +44,13 @@ const double kMinSpeakScore = 0.70;
 /// 真正发声的接口。抽出来是为了让 [Announcer] 的取舍逻辑能被单测覆盖——
 /// 播报判定的 bug（该说的没说、不该说的重复说）在真机上极难复现和定位。
 abstract class Speaker {
+  /// 初始化並挑一個語音。回傳**實際選用的**語言標籤（無法判斷時 null）。
+  ///
+  /// 放在接口上而不是只留在 `FlutterTtsSpeaker`：畫面需要知道選中的語言
+  /// 是否與系統相符（不符要提醒使用者，他會聽到奇怪的語言），
+  /// 而那個判斷不該綁在具體實作上——否則測試就得真的去驅動 TTS。
+  Future<String?> initialize();
+
   Future<void> speak(String text);
   Future<void> stop();
 
@@ -53,6 +60,9 @@ abstract class Speaker {
 
 /// 什么都说不做的扬声器，供桌面调试与测试使用。
 class NullSpeaker implements Speaker {
+  @override
+  Future<String?> initialize() async => null;
+
   @override
   Future<void> speak(String text) async {}
 
@@ -145,6 +155,63 @@ class Announcer {
 
   /// 是否启用播报。关掉后仍会记录「本该播报」的决策，便于演示防抖逻辑。
   bool enabled = true;
+
+  /// 上一次唸「招牌文字」的时间。
+  DateTime? _lastTextAt;
+
+  /// 兩次識字播報之間的最小間隔。
+  ///
+  /// 比 [globalCooldown] 短是刻意的：識字是**使用者主動想知道**的資訊
+  /// （他站在店門口），而障礙物是**被動必須知道**的。前者可以密一點，
+  /// 後者絕不能被蓋掉。
+  Duration get textCooldown => const Duration(seconds: 3);
+
+  /// 現在能不能唸招牌文字？
+  ///
+  /// ## 這條規則是整個識字功能的安全閥
+  ///
+  /// 招牌在香港街頭是**密集**的。若讀到就唸，結果是使用者一直聽到店名，
+  /// 而**「前面有樓梯」被蓋掉**。對全盲使用者那是安全問題，不只是煩。
+  ///
+  /// 所以識字播報必須**讓位**給障礙物播報：剛播報過障礙物的一段時間內
+  /// （用 [globalCooldown]，因為那正是障礙物播報「還在生效」的窗口）
+  /// 完全不碰語音。招牌晚幾秒唸不會有人受傷，樓梯沒唸會。
+  ///
+  /// 回傳 false 時呼叫方應該**把文字留著、稍後再試**（見
+  /// `TextSpotter.defer`），而不是直接丟掉——否則那個招牌就再也不會被念。
+  bool canSpeakText({DateTime? now}) {
+    if (!enabled) return false;
+    final at = now ?? _clock();
+
+    // 正在說話（可能是障礙物）→ 不插嘴。
+    if (_speaking) return false;
+
+    // 剛播報過障礙物 → 讓位。
+    final any = _lastAny;
+    if (any != null && at.difference(any) < globalCooldown) return false;
+
+    final last = _lastTextAt;
+    if (last != null && at.difference(last) < textCooldown) return false;
+
+    return true;
+  }
+
+  /// 唸一段招牌文字。回傳是否真的唸出去了。
+  ///
+  /// **永不插隊、永不中斷**：這是它與 [onFrame] 那條路的關鍵差別。
+  /// 障礙物播報可以打斷識字（P0 甚至會 `stop()` 掉它），反之不行。
+  bool speakText(String text, {DateTime? now, bool interrupt = false}) {
+    if (text.trim().isEmpty) return false;
+    if (!canSpeakText(now: now)) return false;
+
+    final at = now ?? _clock();
+    _lastTextAt = at;
+    _lastSpeech = _speak(text, interrupt: interrupt);
+    return true;
+  }
+
+  /// 最近一次識字播報的時間（供診斷與測試）。
+  DateTime? get lastTextAt => _lastTextAt;
 
   /// 处理一帧检测结果，决定是否播报。
   ///
@@ -267,6 +334,7 @@ class Announcer {
   void reset() {
     _lastByClass.clear();
     _lastAny = null;
+    _lastTextAt = null;
     history.clear();
     _lastSpeech = null;
   }

@@ -33,6 +33,7 @@ class FlutterTtsSpeaker implements Speaker {
   }
 
   /// Initialize and pick a voice. Returns the resolved language tag.
+  @override
   Future<String?> initialize() async {
     if (_ready) return _resolved;
 

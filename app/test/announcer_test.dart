@@ -12,6 +12,10 @@ class _FakeSpeaker implements Speaker {
   final List<String> spoken = <String>[];
   int stops = 0;
 
+  /// 回傳 null：不觸發「語音包與系統語言不符」那條警告台詞。
+  @override
+  Future<String?> initialize() async => null;
+
   @override
   Future<void> speak(String text) async => spoken.add(text);
 
@@ -217,6 +221,85 @@ void main() {
   test('播报文本就是类别中文名，不加修饰语', () {
     final label = kLabels[_binP0Id];
     expect(announceTextFor(label), label.nameZh);
+  });
+
+  /// 識字播報（招牌文字）與障礙物播報的關係。
+  ///
+  /// ## 為什麼這一組是本專案最重要的一組測試之一
+  ///
+  /// 香港街頭的招牌是**密集**的。若讀到字就唸，結果會是使用者一直聽到店名，
+  /// 而**「前面有樓梯」被蓋掉**。對全盲使用者那是安全問題，不只是煩。
+  ///
+  /// 所以規則是不對稱的：障礙物可以打斷識字，反之**永遠不行**。
+  /// 這個不對稱在真機上很難驗證（你不可能一邊走樓梯一邊數句子），
+  /// 所以用可注入時鐘把它釘死。
+  group('識字播報讓位給障礙物', () {
+    test('乾淨狀態下可以唸文字', () {
+      expect(announcer.canSpeakText(), isTrue);
+      expect(announcer.speakText('麥當勞'), isTrue);
+      expect(speaker.spoken, <String>['麥當勞']);
+    });
+
+    test('★ 剛播報過障礙物時不唸文字（招牌不能蓋掉「前面有樓梯」）', () async {
+      await announce(<Detection>[_det(_binP0Id)]);
+      speaker.spoken.clear();
+
+      expect(announcer.canSpeakText(), isFalse);
+      expect(announcer.speakText('麥當勞'), isFalse);
+      expect(speaker.spoken, isEmpty);
+    });
+
+    test('障礙物播報的冷卻窗口過後，文字就能唸', () async {
+      await announce(<Detection>[_det(_binP0Id)]);
+      speaker.spoken.clear();
+
+      clock.advance(announcer.globalCooldown + const Duration(milliseconds: 1));
+      expect(announcer.canSpeakText(), isTrue);
+      expect(announcer.speakText('麥當勞'), isTrue);
+    });
+
+    test('文字有自己的冷卻，不會連續唸兩段', () async {
+      expect(announcer.speakText('麥當勞'), isTrue);
+      // 不 await 的話 `_speaking` 還是 true（`_speak` 是非同步的），
+      // 下一個斷言會誤判成「被冷卻擋住」。既有測試也是這樣處理的。
+      await announcer.lastSpeech;
+
+      expect(announcer.speakText('出口'), isFalse, reason: '同一時間只唸一句');
+
+      clock.advance(announcer.textCooldown + const Duration(milliseconds: 1));
+      expect(announcer.speakText('出口'), isTrue);
+    });
+
+    test('文字冷卻比障礙物冷卻短（主動想知道 vs 被動必須知道）', () {
+      expect(announcer.textCooldown, lessThan(announcer.globalCooldown));
+    });
+
+    test('禁播時文字也不說', () {
+      announcer.enabled = false;
+      expect(announcer.canSpeakText(), isFalse);
+      expect(announcer.speakText('麥當勞'), isFalse);
+    });
+
+    test('空字串不佔用語音', () {
+      expect(announcer.speakText(''), isFalse);
+      expect(announcer.speakText('   '), isFalse);
+      expect(announcer.canSpeakText(), isTrue, reason: '沒有真的說話，不該進冷卻');
+    });
+
+    test('reset 會清掉文字冷卻', () async {
+      announcer.speakText('麥當勞');
+      await announcer.lastSpeech;
+      expect(announcer.canSpeakText(), isFalse);
+
+      announcer.reset();
+      expect(announcer.lastTextAt, isNull);
+      expect(announcer.canSpeakText(), isTrue);
+    });
+
+    test('文字播報不會記進障礙物歷史（那是防抖證據，不該被灌）', () {
+      announcer.speakText('麥當勞');
+      expect(announcer.history, isEmpty);
+    });
   });
 }
 

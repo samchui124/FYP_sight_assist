@@ -9,6 +9,10 @@ import 'package:pathguide/ui/auth_page.dart';
 class RecordingSpeaker implements Speaker {
   final List<String> spoken = [];
 
+  /// 回傳 null：不觸發「語音包與系統語言不符」那條警告台詞。
+  @override
+  Future<String?> initialize() async => null;
+
   @override
   Future<void> speak(String text) async => spoken.add(text);
 

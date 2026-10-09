@@ -2,297 +2,337 @@ import 'dart:async';
 import 'dart:io' show Platform;
 
 import 'package:flutter/foundation.dart'
-    show TargetPlatform, defaultTargetPlatform, kDebugMode;
+    show TargetPlatform, defaultTargetPlatform;
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart' show Clipboard, ClipboardData;
 
-import '../auth/auth_strings.dart';
-import '../auth/mock_auth_service.dart';
-import '../capture/frame_sampler.dart';
-import 'auth_page.dart';
+import '../capture/text_read_result.dart';
+import '../diag/status_log.dart';
 import '../l10n/app_strings.dart';
 import '../overlay/box_painter.dart';
+import '../text/text_spotter.dart';
 import '../tts/announcer.dart';
 import '../tts/flutter_tts_speaker.dart';
 import '../vision/detection.dart';
-import '../vision/mock_vision_source.dart';
 import '../vision/platform_vision.dart';
 import '../vision/vision_preview.dart';
 import '../vision/vision_source.dart';
 
-/// 界面可切换的检测来源种类。
+/// 領路通的主畫面——**整個 App 唯一的畫面**。
 ///
-/// 这个枚举只用来渲染「相机 / 假数据」两个按钮，**不参与运行期分派**——
-/// 分派由 [_DemoPageState._makeSource] 完成，之后 UI 只持有一个
-/// [VisionSource]。曾经 UI 里通篇是 `_platform.xxx` 与 `_mock?.xxx` 两套
-/// 并行分支，换平台要把每个分支抄一遍，且两个实现的行为无一致性保证。
-enum SourceMode {
-  /// 真实相机：Android CameraX / iOS AVFoundation。
-  camera,
-
-  /// 按已知规律运动的假框，用来校验坐标映射与演示防抖，不需要模型。
-  mock,
-}
-
-/// M3 最小可见 Demo 的主界面。
+/// ## 這裡刻意沒有什麼
 ///
-/// UI copy follows the system language; English is the default pack.
-/// 验收目标（见毕设设计 §9.1）：相机实时画面 + 检测框 + 标签 +
-/// FPS 与推理耗时 + 阈值滑条 + 语音播报。
+/// 這個畫面曾經是開發用的 demo 面板：資料來源切換（相機／假數據）、
+/// 門檻滑條、FPS 與推理耗時、120 行的診斷面板、自適應除錯疊字、
+/// 長按 4 秒看錯誤詳情。那些都是**開發者需要的**，不是使用者需要的。
+///
+/// 它們被移掉的理由不只是「不好看」，有兩條具體的：
+///
+/// 1. **門檻滑條對全盲使用者沒有意義。** 「0.42」不是他能判斷的東西，
+///    調了會怎樣也無從得知。門檻該由 `kMinSpeakScore` 那套（有實測依據）
+///    在程式裡決定，不該放在使用者手指下。
+/// 2. **那個 debug 入口在盲用情境下從來沒有真正可用過。** 它的觸發方式是
+///    **長按 4 秒**，而 TalkBack 開著時手勢會被攔截——也就是說，
+///    全盲使用者打不開它，低視力使用者打開了也看不到它的意義。
+///
+/// ## 診斷資訊去哪裡了
+///
+/// 沒有消失，改成**寫出來**：`logcat` 加上一個可拉出的狀態檔
+/// （見 [StatusLog]）。`VisionPlugin.kt` 裡那段計數器的註解記著它的來歷——
+/// 「預覽正常但推理 0 次」當年只能靠反覆重新構建來猜。所以不能把它丟掉，
+/// 只是不该畫在產品畫面上。狀態檔**永遠只留最近一份**，不留歷史（隱私）。
+///
+/// ## 輸出通道是語音，不是畫面
+///
+/// 障礙物與招牌都經由 TTS 出去。畫面留給低視力使用者與陪護者看，
+/// 所以預覽、偵測框、標籤、狀態文字都還在——但它們是輔助，不是主要通道。
 class DemoPage extends StatefulWidget {
-  const DemoPage({super.key});
+  const DemoPage({super.key, this.speaker, this.sourceFactory});
+
+  /// 語音輸出。預設是真的 TTS；測試注入假的，讓「按了要出聲」這類
+  /// 行為可以被斷言（不然就得靠真機聽）。
+  final Speaker? speaker;
+
+  /// 建立檢測來源。預設是 `PlatformVision`（真相機）。
+  ///
+  /// 為什麼要可注入：這張畫面**沒有相機就沒有引導狀態**，
+  /// 而 widget 測試跑在桌面上。沒有這個接縫，「引導中」那條路徑
+  /// （按鈕消失、出現結束引導、招牌讓位）就完全測不到，
+  /// 只能靠真機目視——那正是這個專案吃過虧的地方。
+  final VisionSource Function()? sourceFactory;
 
   @override
   State<DemoPage> createState() => _DemoPageState();
 }
 
-class _DemoPageState extends State<DemoPage> {
-  final FlutterTtsSpeaker _speaker = FlutterTtsSpeaker();
+class _DemoPageState extends State<DemoPage> with WidgetsBindingObserver {
+  late final Speaker _speaker = widget.speaker ?? FlutterTtsSpeaker();
   late final Announcer _announcer = Announcer(speaker: _speaker);
 
-  StreamSubscription<VisionFrame>? _sub;
+  /// 機會式讀字。見 [TextSpotter] 的說明：只在偵測的空檔讀，
+  /// 因為這台機器上「平行的第二條執行緒」救不了 CPU 滿載的問題。
+  late final TextSpotter _spotter = TextSpotter(read: _readTextNow);
 
-  SourceMode _mode = SourceMode.camera;
+  StatusLog? _statusLog;
+  Timer? _statusTimer;
 
-  /// **界面唯一持有的检测来源。**
-  ///
-  /// 相机与假数据都是 [VisionSource]，UI 不再需要知道用的是哪一个
-  /// （只有渲染预览时按 [_mode] 决定显示相机视图还是网格背景）。
   VisionSource? _source;
-
-  double _threshold = 0.30;
-  bool _speakEnabled = true;
-  bool _showLabels = true;
+  StreamSubscription<VisionFrame>? _sub;
 
   List<Detection> _detections = const <Detection>[];
 
-  double _inferenceMs = 0;
-  double _fps = 0;
-  DateTime _lastFrameAt = DateTime.now();
+  /// 引導是否在跑。false 時畫面上才有「啟動引導」那顆按鈕。
+  bool _guiding = false;
 
-  /// Runtime status line. Null means "still on the initial placeholder".
-  ///
-  /// Do **not** seed this with `AppStrings.current.…` as a field initializer:
-  /// that freezes the string at State construction. If the system language
-  /// changes before the first reassignment, the UI would keep the old pack.
-  /// Resolve the placeholder through [_statusText] / [_s] at paint time.
-  String? _status;
-  String? _statusError;
+  bool _speakEnabled = true;
+
+  double _fps = 0;
+  double _inferenceMs = 0;
+  DateTime _lastFrameAt = DateTime.now();
+  int _frames = 0;
+
+  /// 狀態文字。**一律是可唸的完整句**，不是數字或代號——
+  /// 這個專案曾把「按了沒反應」列為最嚴重的缺口，
+  /// 所以任何狀態變化都要有一句話能說出來。
+  String _status = '';
+
+
+  /// 幀尺寸与旋转角都来自 [VisionSource]，不在 UI 里写常量。
+  Size get _frameSize => _source?.frameSize ?? const Size(1280, 720);
 
   AppStrings get _s => AppStrings.current;
-
-  String get _statusText => _status ?? _s.initializing;
-
-  /// 本次初始化是否成功。用于状态栏配色与错误面板显示。
-  bool _sourceReady = false;
-  String? _ttsLanguage;
-
-  /// 原生侧诊断快照，定时轮询后显示在 HUD 上。
-  /// 假数据源的 [VisionSource.diagnostics] 返回 null，此时面板自动隐藏。
-  VisionDiagnostics? _diagnostics;
-  Timer? _diagTimer;
-
-  FrameSampler? _frameSampler;
-  bool _capturing = false;
-  int _captureCount = 0;
-
-  /// 帧尺寸与旋转角都来自 [VisionSource]，不在 UI 里写常量。
-  ///
-  /// `frameSize` 已经是**旋转之后**的尺寸，可直接用于 `DisplayFit`。
-  Size get _frameSize =>
-      _source?.frameSize ?? const Size(1280, 720);
-
-  int get _rotationDegrees => _source?.rotationDegrees ?? 0;
-
-  /// 最近一次布局算出的 fit 与屏幕矩形，**只给 [_logHud] 用**。
-  ///
-  /// 为什么要在 build 里顺手记下来：判断「屏幕上到底画没画框」需要的是
-  /// **映射之后的屏幕矩形**，而它只在 build 里算得出来。这里只做赋值、
-  /// 不触发重建，因此不改变 build 的语义。
-  DisplayFit? _lastFit;
-  List<({Detection detection, Rect rect})> _lastMapped =
-      const <({Detection detection, Rect rect})>[];
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     WidgetsBinding.instance.addPostFrameCallback((_) => _bootstrap());
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // 切到背景就別再讀字了：相機停了、lastCapture 也不再更新，
+    // 繼續排程只是白燒 CPU（而且回來時會唸出一段過期的招牌）。
+    if (state == AppLifecycleState.paused && _guiding) {
+      _stopGuidance();
+    }
   }
 
   Future<void> _bootstrap() async {
     await _initSpeaker();
-    if (!Platform.isAndroid && !Platform.isIOS) return;
-    await _switchSource(SourceMode.camera);
+    // 桌面與 Web 沒有這個原生插件；讓畫面留在「無法啟動引導」的狀態，
+    // 而不是去呼叫一個不存在的通道然後噴例外。
+    //
+    // 有注入來源時（測試）不受這個限制：那條路徑上根本沒有原生通道。
+    if (widget.sourceFactory == null &&
+        !Platform.isAndroid &&
+        !Platform.isIOS) {
+      if (mounted) setState(() => _status = _s.noCameraOnDevice);
+      return;
+    }
+    await _startGuidance();
   }
 
   Future<void> _initSpeaker() async {
     final lang = await _speaker.initialize();
     if (!mounted) return;
-    setState(() {
-      _ttsLanguage = lang;
-      // Only warn when TTS could not match the system language family
-      // and fell back to a different language tag.
-      if (lang != null) {
-        final sys = WidgetsBinding.instance.platformDispatcher.locale;
-        final sysLang = sys.languageCode.toLowerCase();
-        final used = lang.toLowerCase().replaceAll('_', '-');
-        final matched = used == sysLang ||
-            used.startsWith('$sysLang-') ||
-            (sysLang == 'zh' &&
-                (used.startsWith('zh') || used.startsWith('yue'))) ||
-            (sysLang == 'yue' &&
-                (used.startsWith('yue') || used.startsWith('zh-hk')));
-        if (!matched) {
-          _status = _s.ttsFallbackWarning(lang);
-        }
+    if (lang != null) {
+      final sys = WidgetsBinding.instance.platformDispatcher.locale;
+      final sysLang = sys.languageCode.toLowerCase();
+      final used = lang.toLowerCase().replaceAll('_', '-');
+      final matched = used == sysLang ||
+          used.startsWith('$sysLang-') ||
+          (sysLang == 'zh' &&
+              (used.startsWith('zh') || used.startsWith('yue'))) ||
+          (sysLang == 'yue' &&
+              (used.startsWith('yue') || used.startsWith('zh-hk')));
+      if (!matched) {
+        // 語音包不匹配是**使用者必須知道**的事（他會聽到奇怪的語言），
+        // 所以還是要唸；同時寫進 logcat 供事後診斷。
+        _say(_s.ttsFallbackWarning(lang));
+        debugPrint('[PathGuide] TTS fallback: $lang (system=${sys.toLanguageTag()})');
       }
-    });
+    }
   }
 
-  /// 按种类构造一个检测来源。
-  ///
-  /// 这是**唯一**出现具体实现类名的地方。新增平台（iOS）或新增来源种类时，
-  /// 只改这一处，UI 其余部分不动。
-  VisionSource _makeSource(SourceMode mode) {
+  // ------------------------------------------------------------- 來源生命週期
+
+  VisionSource _makeSource() {
+    final injected = widget.sourceFactory;
+    if (injected != null) return injected();
     // iOS VisionPlugin 在原生侧把帧旋成竖屏（rotationDegrees=0）；
     // Android CameraX 仍输出横屏帧，需 Dart 侧按 90° 推出正立坐标系。
     final isIos = defaultTargetPlatform == TargetPlatform.iOS;
-    final rotation = isIos ? 0 : 90;
-    switch (mode) {
-      case SourceMode.camera:
-        return PlatformVision(rotationDegrees: rotation);
-      case SourceMode.mock:
-        // 假源几何与当前平台相机一致，避免「假数据对了、真相机错了」。
-        return MockVisionSource(
-          frameSize: isIos ? const Size(720, 1280) : const Size(1280, 720),
-          rotationDegrees: rotation,
-          threshold: _threshold,
-        );
+    return PlatformVision(rotationDegrees: isIos ? 0 : 90);
+  }
+
+  /// 啟動引導：建立相機來源、接上流與播報。
+  Future<void> _startGuidance() async {
+    // **先出聲再做事。** 這一句是整個畫面最重要的回饋：
+    // 使用者按了之後若安靜兩秒，他不知道是按失敗還是還在忙。
+    _say(_s.starting);
+    if (mounted) setState(() => _status = _s.starting);
+
+    _announcer.reset();
+    _spotter.reset();
+
+    final source = _makeSource();
+    _source = source;
+
+    // 先接流再 initialize：否则首帧可能丢。
+    _sub = source.frames.listen(
+      _onFrame,
+      onError: (Object e) {
+        if (mounted) setState(() => _status = _s.inferenceStreamError(e));
+      },
+    );
+
+    final status = await source.initialize();
+    if (!mounted) return;
+
+    setState(() {
+      _guiding = status.ok;
+      _status = status.ok ? _s.guiding : status.message;
+    });
+
+    if (status.ok) {
+      _startStatusLog(source: source);
+      if (_speakEnabled) _say(_s.guiding);
+    } else {
+      // 失敗一定要出聲，否則使用者只會反覆按同一顆按鈕。
+      _say(status.message);
     }
   }
 
-  /// 切换检测来源：停旧的、起新的、重接流与诊断轮询。
-  Future<void> _switchSource(SourceMode mode) async {
-    await _sub?.cancel();
-    _diagTimer?.cancel();
-    _stopCapture();
-    _announcer.reset();
-
+  /// 停止引導：拆掉相機、停止語音、清掉畫面。
+  ///
+  /// ## ★ 為什麼這裡**不** await `cancel()` 與 `dispose()`
+  ///
+  /// 這是本方法最重要的一點，而且是被測試抓出來的：
+  ///
+  /// `StreamSubscription.cancel()` 與 `VisionSource.dispose()` 都回傳 Future，
+  /// 但它們**沒有保證會完成**。實際踩到的情況是 `cancel()` 永遠不回來，
+  /// 於是整個方法卡在第一行——按鈕看起來完全沒作用，沒有錯誤、沒有訊息，
+  /// 畫面就停在「引導中」。那正是本專案列為最嚴重的那類缺陷。
+  ///
+  /// 所以拆解順序刻意改成：
+  ///   1. 先讓**介面立刻回到未啟動狀態**（同步，不依賴任何 Future）
+  ///   2. 再在背景把資源收掉，失敗只寫診斷
+  ///
+  /// 收音機不會因為清理慢半拍而繼續運作：`_source` 一設成 null，
+  /// `_onFrame` 的來源就沒了，而且 `_guiding` 已經變 false。
+  void _stopGuidance() {
+    final sub = _sub;
     final old = _source;
-    await old?.dispose();
+    _sub = null;
+    _source = null;
 
-    final source = _makeSource(mode);
-    _source = source;
+    _announcer.reset();
+    _spotter.reset();
+    _statusTimer?.cancel();
+    _statusTimer = null;
 
     if (mounted) {
       setState(() {
-        _mode = mode;
+        _guiding = false;
         _detections = const <Detection>[];
-        _diagnostics = null;
-        _status = _s.initializingSource(source.displayName);
-        _statusError = null;
-        _sourceReady = false;
+        _fps = 0;
+        _inferenceMs = 0;
+        _frames = 0;
+        _status = _s.guidanceStopped;
       });
     }
+    _say(_s.guidanceStopped);
 
-    // 先接流再初始化：否则首帧可能丢。
-    _sub = source.frames.listen(_onFrame, onError: (Object e) {
-      if (mounted) setState(() => _status = _s.inferenceStreamError(e));
-    });
-    final status = await source.initialize();
-
-    // ★ 阈值必须在 initialize 之后写。
-    // PlatformVision 的 threshold setter 会把值推给原生；若在 initialize 前写，
-    // 原生相机尚未启动，推送会被静默忽略——于是「初始阈值」实际没生效，
-    // 要等用户拖一次滑动条才对上。这类时序错误不报错。
-    source.threshold = _threshold;
-
-    if (!mounted) return;
-    setState(() {
-      _sourceReady = status.ok;
-      _status = status.message;
-      _statusError = status.error;
-    });
-
-    // 诊断轮询。假数据源返回 null，面板会自动隐藏——
-    // 不会像以前那样在假数据模式下仍去轮询一个不存在的原生设备。
-    _diagTimer = Timer.periodic(const Duration(milliseconds: 500), (_) async {
-      final d = await source.diagnostics();
-      if (mounted && d != null) setState(() => _diagnostics = d);
-      _logHud();
-    });
+    // 背景清理。`unawaited` 是刻意的——見上面的說明。
+    unawaited(() async {
+      try {
+        await sub?.cancel();
+      } catch (e) {
+        debugPrint('[PathGuide] 取消幀訂閱失敗（已忽略）：$e');
+      }
+      try {
+        await old?.dispose();
+      } catch (e) {
+        debugPrint('[PathGuide] 釋放來源失敗（已忽略）：$e');
+      }
+      try {
+        await _speaker.stop();
+      } catch (e) {
+        debugPrint('[PathGuide] 停止語音失敗（已忽略）：$e');
+      }
+    }());
   }
 
-  /// 把 HUD 上的关键数字同步打一行到 logcat（仅 Debug 构建）。
-  ///
-  /// ## 为什么要有这一行
-  ///
-  /// 诊断信息原本只画在屏幕上，于是「真机验证」只能靠人眼看屏幕复述数字：
-  /// 无法无人值守、无法留证、也无法在远程排查时比对。
-  /// 截图虽然能留证，但要读屏幕上的小字仍需人工（或 OCR）。
-  ///
-  /// 这一行让整条链路变成**可被程序读取**的：帧率、耗时至 UI 的检测框数、
-  /// 原生分析帧数、最高分、无效值分类、几何输入、张量布局全在同一行里。
-  /// 于是「跑一次真机」= 装包 + 抓 logcat，不需要任何人盯屏幕。
-  ///
-  /// 字段名刻意用 ASCII，方便 grep：
-  ///
-  ///     HUD fps=.. inf=..ms det=.. analyzed=.. nativeDet=.. maxScore=.. ...
-  ///
-  /// 其中 `boxes=` 是**映射之后的屏幕矩形**（最多 3 个），
-  /// `paint=` 是画布会实际画出的框数——它按 `DetectionBoxPainter` 的规则
-  /// （`rect.width/height < 2` 视为噪点而跳过）算出来。
-  /// 这一项直接回答最初那句「HUD 有数字、屏幕上一个框都没有」：
-  /// `det>0` 而 `paint=0` 就说明矩形退化或被裁掉，而不是「类别没对上」。
-  void _logHud() {
-    if (!kDebugMode) return;
-    final d = _diagnostics;
-    final reasons = d == null || d.invalidByReason.isEmpty
-        ? '-'
-        : d.invalidByReason.entries
-            .map((e) => '${e.key}=${e.value}')
-            .join(',');
-    final paint = _lastMapped
-        .where((m) => m.rect.width >= 2 && m.rect.height >= 2)
-        .length;
-    final boxes = _lastMapped
-        .take(3)
-        .map((m) => '(${m.rect.left.round()},${m.rect.top.round()},'
-            '${m.rect.width.round()}x${m.rect.height.round()})')
-        .join(' ');
-    debugPrint(
-      'HUD fps=${_fps.toStringAsFixed(1)} '
-      'inf=${_inferenceMs.toStringAsFixed(1)}ms '
-      'det=${_detections.length} '
-      'paint=$paint '
-      'speakMin=${kMinSpeakScore.toStringAsFixed(2)} '
-      'boxes=[$boxes] '
-      'analyzed=${d?.analyzedFrames ?? -1} '
-      'nativeDet=${d?.detectionCount ?? -1} '
-      'maxScore=${(d?.frameMaxScore ?? 0).toStringAsFixed(3)} '
-      'invalid=${d?.invalidDetections ?? -1} '
-      'reasons=$reasons '
-      'fit=${_lastFit?.scale.toStringAsFixed(3) ?? '-'} '
-      'frame=${d?.frameWidth ?? 0}x${d?.frameHeight ?? 0} '
-      'rot=$_rotationDegrees '
-      'src=${_frameSize.width.toInt()}x${_frameSize.height.toInt()} '
-      'decode=${d?.decodeStats ?? '-'} '
-      'skip=${(d?.skippedReason.isNotEmpty ?? false) ? d!.skippedReason : '-'} '
-      'err=${(d?.analyzeError.isNotEmpty ?? false) ? d!.analyzeError : '-'}',
-    );
+  /// 狀態檔：把診斷數字寫出來，而不是畫在畫面上。
+  void _startStatusLog({required VisionSource source}) {
+    if (source is! PlatformVision) return;
+
+    // 目錄由原生提供（`modelDir`）。不用 path_provider：它會拉進
+    // objective_c，那是本倉庫的硬約束——路徑含空格會讓 build hook 失敗。
+    unawaited(() async {
+      try {
+        final dir = await source.appFilesDir();
+        if (dir == null || !mounted) return;
+        _statusLog = StatusLog(dir: dir);
+        _writeStatus(); // 立刻寫第一份，別等第一個週期。
+        _statusTimer = Timer.periodic(
+          const Duration(seconds: 5),
+          (_) => _writeStatus(),
+        );
+      } catch (e) {
+        debugPrint('[PathGuide] 狀態檔不可用（已忽略）：$e');
+      }
+    }());
   }
+
+  void _writeStatus() {
+    final log = _statusLog;
+    if (log == null) return;
+    unawaited(log.write(<String, Object?>{
+      'frames': _frames,
+      'fps': _fps,
+      'inferenceMs': _inferenceMs,
+      'detections': _detections.length,
+      'guiding': _guiding,
+      'voice': _speakEnabled,
+      // 機會式讀字的狀態。這幾個數字決定「招牌多久被唸一次」，
+      // 而那是真機上唯一能回答「有沒有在搶 CPU」的證據。
+      'spotAttempts': _spotter.attempts,
+      'spotEmptyStreak': _spotter.consecutiveEmpty,
+      'spotIntervalMs': _spotter.currentInterval.inMilliseconds,
+      'spotLastReason': _spotter.lastReason,
+      'spotLastText': _spotter.lastText,
+    }));
+  }
+
+  /// 讀一幀的文字。機會式排程的**唯一**入口。
+  Future<TextReadResult> _readTextNow() async {
+    final source = _source;
+    if (source is! PlatformVision || !source.supportsTextReading) {
+      // 平台沒實作（iOS）或相機沒起來。回一個明確的失敗，
+      // 讓 TextSpotter 的診斷字串說得出原因，而不是沉默。
+      return TextReadResult.fail('此平台或此來源不支援讀字');
+    }
+    return source.readText();
+  }
+
+  // ------------------------------------------------------------- 幀處理
 
   void _onFrame(VisionFrame frame) {
     if (!mounted) return;
     final now = DateTime.now();
     final dt = now.difference(_lastFrameAt).inMicroseconds;
     _lastFrameAt = now;
+    _frames++;
 
-    // **不再按阈值过滤**：阈值已在来源内部生效（原生侧丢弃低分框，
-    // 假源同样按 threshold 过滤）。两处各过滤一次时，不一致的表现是
-    // 「滑动条不生效」或「框数对不上」，且不报错。
+    // **不再按阈值过滤**：阈值已在来源内部生效（原生侧丢弃低分框）。
+    // 两处各过滤一次时，不一致的表现是「框数对不上」，且不报错。
     _announcer.enabled = _speakEnabled;
     if (_speakEnabled) _announcer.onFrame(frame.detections);
+
+    // 機會式讀字：**只有在偵測的空檔才做**，所以不 await——
+    // 在這裡 await 就是把它變成「與偵測並行」，那正是要避免的事。
+    if (_speakEnabled) _feedSpotter(frame.detections);
 
     setState(() {
       _detections = frame.detections;
@@ -305,111 +345,56 @@ class _DemoPageState extends State<DemoPage> {
     });
   }
 
-  void _stopCapture() {
-    _frameSampler?.stop();
-    _frameSampler = null;
-    if (_capturing && mounted) {
-      setState(() => _capturing = false);
-    } else {
-      _capturing = false;
-    }
+  void _feedSpotter(List<Detection> detections) {
+    if (!_spotter.shouldReadNow(detections)) return;
+    unawaited(() async {
+      final spot = await _spotter.tick(detections);
+      if (spot == null || !spot.hasText || !mounted) return;
+
+      // ★ 安全閥：招牌**永遠不能**蓋掉障礙物播報。
+      //
+      // 香港街頭的招牌很密集，讀到就唸的結果會是使用者一直聽到店名，
+      // 而「前面有樓梯」被蓋掉。所以讓位給障礙物——晚幾秒唸招牌沒人受傷，
+      // 樓梯沒唸會。見 Announcer.canSpeakText。
+      final said = _announcer.speakText(
+        '${_s.readSignPrefix}${TextSpotter.clip(spot.text)}',
+        // 不打斷：若正在說話，就等下一輪。
+        interrupt: false,
+      );
+      if (said) {
+        // 只有真的唸出去才進重複冷卻。沒唸到就讓它下一輪再試，
+        // 否則那塊招牌會永遠不再被念。
+        _spotter.markSpoken();
+      } else {
+        _spotter.defer();
+      }
+    }());
   }
 
-  /// 開啟登入 / 帳號頁。
+  /// 直接對喇叭說話，**繞過** [Announcer] 的冷卻。
   ///
-  /// ## 三個刻意的決定
-  ///
-  /// 1. **登入不是首頁，引導也不是靠它才能用。** 這一頁是從動作列「進去再出來」
-  ///    的獨立頁面，未登入時引導、播報、畫框完全不受影響。這是硬規則：
-  ///    領路通是行動輔具，忘密碼或斷網都不能把使用者丟在街上。
-  ///
-  /// 2. **用 `MockAuthService`（假貨）。** 本專案目前沒有任何後端，
-  ///    所以這裡登入**一定會成功**，帳號是假的 `mock.user@pathguide.test`。
-  ///    ⚠️ **示範時不要把它講成真的登入。** 接上真實後端時，
-  ///    只要把這一行換成真實的 `AuthService` 實作，其他都不用動。
-  ///
-  /// 3. **三個 callback 全部接上 `Navigator.pop`**，所以登入成功、按「稍後再說」、
-  ///    按「回到引導」都會回到引導畫面。沒有出口的頁面等於把使用者關起來。
-  void _openAuth() {
-    Navigator.of(context).push<void>(MaterialPageRoute<void>(
-      builder: (_) => AuthPage(
-        service: MockAuthService(),
-        speaker: _speaker,
-        onSkip: () => Navigator.of(context).pop(),
-        onSignedIn: (_) => Navigator.of(context).pop(),
-        onBackToGuidance: () => Navigator.of(context).pop(),
-      ),
-    ));
-  }
-
-  /// 用 App 自己的語音回饋一次操作。
-  ///
-  /// ★ 為什麼擷取需要這個（實測回報的 bug）：原本開始／停止擷取的唯一回饋是
-  ///   圖示變色（`camera_outlined` → `camera`、轉 `orangeAccent`）加上動作列
-  ///   下方一行 12px 小字，**全部是視覺的**。對全盲使用者來說
-  ///   「開始成功」與「被拒絕」長得一模一樣（都是沉默），所以他會回報
-  ///   「按了沒反應」——而程式其實是好的。
-  ///
-  /// ★ 遵守既有的分流規則：螢幕閱讀器開著時**不出聲**，交給它播報，
-  ///   否則兩隻聲音會疊在一起。
+  /// 用在「使用者剛按了什麼」這類即時回饋上：那些不是障礙物播報，
+  /// 不該被障礙物的冷卻壓掉，也不該佔用它的歷史。
   void _say(String text) {
-    if (!mounted) return;
-    if (MediaQuery.of(context).accessibleNavigation) return;
+    if (text.isEmpty) return;
     _speaker.speak(text).ignore();
   }
 
-  void _toggleCapture() {
-    if (_capturing) {
-      _stopCapture();
-      _say(_s.stopCapture);
-      return;
-    }
-    final source = _source;
-    if (_mode != SourceMode.camera ||
-        !_sourceReady ||
-        source is! PlatformVision) {
-      setState(() => _status = _s.captureNeedsCamera);
-      // 被拒絕也必須出聲。這是原本最嚴重的缺口：使用者按了、被拒、
-      // 而且聽不到任何解釋，只能反覆按。
-      _say(_s.captureNeedsCamera);
-      return;
-    }
-    _frameSampler?.stop();
-    _frameSampler = FrameSampler(
-      capture: source.captureFrame,
-      onResult: (result) {
-        if (!mounted) return;
-        setState(() {
-          _captureCount = _frameSampler?.savedCount ?? _captureCount;
-          if (!result.ok && result.error != null) {
-            _status = result.error;
-          } else if (result.ok) {
-            _status = _s.captureSavedCount(_captureCount);
-          }
-        });
-        // ★ 刻意**不**在這裡播報每一張的數量：那會洗版，把真正重要的
-        //   障礙物播報蓋掉（Announcer 有自己的冷卻，經不起連續灌訊息）。
-        //   數量留在畫面文字，需要的人可以自己滑過去讀。
-        //   但**失敗必須出聲**，因為那是使用者必須知道的事。
-        if (!result.ok && result.error != null) {
-          _say(result.error!);
-        }
-      },
-    );
-    _frameSampler!.start();
-    setState(() => _capturing = true);
-    _say(_s.startCapture);
-  }
+  // ------------------------------------------------------------- 畫面
 
   @override
   void dispose() {
-    _stopCapture();
-    _diagTimer?.cancel();
+    _statusTimer?.cancel();
     _sub?.cancel();
     _source?.dispose();
-    _speaker.stop();
+    // 只停自己建立的喇叭。注入進來的由它的所有者負責——
+    // 在測試裡那個所有者是測試本身，它還要拿 `spoken` 做斷言。
+    if (widget.speaker == null) _speaker.stop();
+    WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
+
+  // ------------------------------------------------------------- 畫面
 
   @override
   Widget build(BuildContext context) {
@@ -418,16 +403,36 @@ class _DemoPageState extends State<DemoPage> {
       body: SafeArea(
         child: Column(
           children: <Widget>[
-            _statusBar(),
+            _header(),
             Expanded(child: _previewArea()),
-            _controlPanel(),
+            _actionArea(),
           ],
         ),
       ),
     );
   }
 
-  // ------------------------------------------------------------- 预览区域
+  Widget _header() {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 10, 16, 6),
+      child: Row(
+        children: <Widget>[
+          // 標題不是互動元素，用 ExcludeSemantics 讓 TalkBack 不為它停一站——
+          // 這張畫面只有兩個可操作項，多一站就是多一次滑動。
+          ExcludeSemantics(
+            child: Text(
+              _s.appTitle,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 18,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 
   Widget _previewArea() {
     return LayoutBuilder(
@@ -441,556 +446,144 @@ class _DemoPageState extends State<DemoPage> {
           detections: _detections,
           fit: fit,
         );
-        // 供 _logHud 报告「映射后的屏幕矩形」——只赋值，不触发重建。
-        _lastFit = fit;
-        _lastMapped = mapped;
 
         return Stack(
           fit: StackFit.expand,
           children: <Widget>[
-            if (_mode == SourceMode.camera) const VisionPreview() else _mockScene(),
+            if (_guiding) const VisionPreview() else _idleScene(),
             // 叠加层不能拦截手势，否则下方的预览收不到事件。
             IgnorePointer(
               child: CustomPaint(
                 painter: DetectionBoxPainter(
                   mapped: mapped,
-                  showLabels: _showLabels,
+                  showLabels: true,
                 ),
               ),
             ),
-            Positioned(left: 8, top: 8, child: _perfPanel()),
-            Positioned(right: 8, top: 8, child: _fitDebug(fit)),
           ],
         );
       },
     );
   }
 
-  /// 假数据模式下的背景：网格 + 十字线，让框的位移更容易看出来。
-  Widget _mockScene() {
-    return CustomPaint(painter: _GridPainter());
-  }
-
-  /// 几何一致性检查：**分析流尺寸**与**预览流尺寸**是否一致。
-  ///
-  /// ## 为什么需要这条
-  ///
-  /// 预览由 CameraX 自己缩放显示，而框的位置由 Dart 用分析流的尺寸算出。
-  /// 两条流的宽高比若不同，画面与框就会**系统性错位**——而且不报错。
-  /// 这是「预览和框对不上」这类问题最难查的一种成因，所以显式检查。
-  ///
-  /// 返回 null 表示一致（或无数据可判）。
-  String? _geometryWarning() {
-    final d = _diagnostics;
-    if (d == null || d.frameWidth <= 0 || d.frameHeight <= 0) return null;
-    // d.frameWidth/Height 是**原始**帧尺寸；来源报的 frameSize 已是旋转后，
-    // 所以比较时把来源的也转回原始尺寸。
-    final raw = rotatedFrameSize(_frameSize, _rotationDegrees);
-    final same = raw.width.round() == d.frameWidth &&
-        raw.height.round() == d.frameHeight;
-    if (same) return null;
-    return _s.geometryMismatch(
-      raw.width.round(),
-      raw.height.round(),
-      d.frameWidth,
-      d.frameHeight,
-    );
-  }
-
-  Widget _perfPanel() {
-    final style = const TextStyle(
-      color: Colors.white,
-      fontSize: 12,
-      fontFeatures: <FontFeature>[FontFeature.tabularFigures()],
-    );
-    final geo = _geometryWarning();
-    return _glass(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisSize: MainAxisSize.min,
-        children: <Widget>[
-          Text('${_s.fps}      ${_fps.toStringAsFixed(1)}', style: style),
-          Text('${_s.inference}     ${_inferenceMs.toStringAsFixed(1)} ms',
-              style: style),
-          Text('${_s.boxes}   ${_detections.length}', style: style),
-          if (geo != null)
-            Padding(
-              padding: const EdgeInsets.only(top: 2),
-              child: SizedBox(
-                width: 210,
-                child: SelectableText(
-                  geo,
-                  style: style.copyWith(color: Colors.redAccent, fontSize: 9),
-                ),
-              ),
-            ),
-          // ---- 诊断计数：这几个数字直接指出链路卡在哪一环 ----
-          // 「分析帧」为 0（红色）说明相机分析回路根本没跑起来；
-          // 「最高分」低于阈值（橙色）说明模型没给出高分，问题在模型或输入；
-          // 「跳过」非空则直接写出被跳过的原因。
-          if (_diagnostics != null) ...<Widget>[
-            Text(
-              '${_s.analyzedFrames}   ${_diagnostics!.analyzedFrames}',
-              style: style.copyWith(
-                color: _diagnostics!.analyzedFrames == 0
-                    ? Colors.redAccent
-                    : Colors.white,
-              ),
-            ),
-            if (_diagnostics!.analyzeErrors > 0)
-              Text('${_s.analyzeErrors} ${_diagnostics!.analyzeErrors}',
-                  style: style.copyWith(color: Colors.redAccent)),
-            Text(
-              '${_s.scoreRange}     ${_diagnostics!.frameMinScore.toStringAsFixed(2)}'
-              '~${_diagnostics!.frameMaxScore.toStringAsFixed(2)}',
-              style: style.copyWith(
-                // 模型最后一层是 sigmoid，分数必在 [0,1]。超过 1 就是解码错了。
-                color: _diagnostics!.frameMaxScore > 1.0
-                    ? Colors.redAccent
-                    : (_diagnostics!.frameMaxScore >= _threshold
-                        ? Colors.greenAccent
-                        : Colors.orangeAccent),
-              ),
-            ),
-            if (_diagnostics!.invalidDetections > 0)
-              Padding(
-                padding: const EdgeInsets.only(top: 2),
-                child: SizedBox(
-                  width: 200,
-                  child: SelectableText(
-                    // 分类计数：三种原因指向完全不同的故障，只有总数时无法区分。
-                    '${_s.invalidDetections} ${_diagnostics!.invalidDetections}\n'
-                    '${_invalidReasonText()}\n'
-                    '${_diagnostics!.invalidSample}',
-                    style: style.copyWith(color: Colors.redAccent, fontSize: 9),
-                  ),
-                ),
-              ),
-            // 任何诊断都显示时，一并显示解码统计（raw vs decoded 的范围对照）。
-            if (_diagnostics!.decodeStats.isNotEmpty)
-              Padding(
-                padding: const EdgeInsets.only(top: 2),
-                child: SizedBox(
-                  width: 210,
-                  child: SelectableText(
-                    _diagnostics!.decodeStats,
-                    style: style.copyWith(color: Colors.lightGreenAccent, fontSize: 8),
-                  ),
-                ),
-              ),
-            // 输入/输出缓冲的真实内容。只在出现无效检测时显示，避免平时刷屏。
-            if (_diagnostics!.invalidDetections > 0) ...<Widget>[
-              if (_diagnostics!.inputStats.isNotEmpty)
-                Padding(
-                  padding: const EdgeInsets.only(top: 2),
-                  child: SizedBox(
-                    width: 200,
-                    child: SelectableText(
-                      '${_s.input} ${_diagnostics!.inputStats}',
-                      style: style.copyWith(color: Colors.cyan, fontSize: 9),
-                    ),
-                  ),
-                ),
-              if (_diagnostics!.outputStats.isNotEmpty)
-                Padding(
-                  padding: const EdgeInsets.only(top: 2),
-                  child: SizedBox(
-                    width: 200,
-                    child: SelectableText(
-                      '${_s.output} ${_diagnostics!.outputStats}',
-                      style: style.copyWith(color: Colors.cyan, fontSize: 9),
-                    ),
-                  ),
-                ),
-            ],
-            // 缓冲指针快照：一直显示。异常发生在推理中途时，
-            // 只有初始化时记下的这份数值还能看。
-            if (_diagnostics!.bufferState.isNotEmpty)
-              Padding(
-                padding: const EdgeInsets.only(top: 2),
-                child: SizedBox(
-                  width: 200,
-                  child: SelectableText(
-                    _diagnostics!.bufferState,
-                    style: style.copyWith(color: Colors.cyanAccent, fontSize: 8),
-                  ),
-                ),
-              ),
-            if (_diagnostics!.analyzeErrors > 0 &&
-                _diagnostics!.analyzeError.isNotEmpty)
-              Padding(
-                padding: const EdgeInsets.only(top: 2),
-                child: SizedBox(
-                  width: 190,
-                  child: SelectableText(
-                    // 异常的完整类型与消息直接摆在屏幕上。
-                    // 真机上没有 logcat 可用，这行文字是唯一的线索来源。
-                    _diagnostics!.analyzeError,
-                    style: style.copyWith(color: Colors.redAccent, fontSize: 9),
-                  ),
-                ),
-              ),
-            if (_diagnostics!.skippedReason.isNotEmpty)
-              Padding(
-                padding: const EdgeInsets.only(top: 2),
-                child: SizedBox(
-                  width: 190,
-                  child: SelectableText(
-                    _diagnostics!.skippedReason,
-                    style: style.copyWith(color: Colors.orangeAccent, fontSize: 9),
-                  ),
-                ),
-              ),
-          ],
-          Text(
-            '${_s.voice}     ${_ttsLanguage ?? _s.ttsNotReady}',
-            style: style.copyWith(
-              color: _speaker.isCantonese ? Colors.greenAccent : Colors.orangeAccent,
+  /// 尚未啟動引導時的背景。刻意保持安靜：只有一句話，
+  /// 不做任何動畫或裝飾——低視力使用者需要的是能讀的字，不是效果。
+  Widget _idleScene() {
+    return ColoredBox(
+      color: const Color(0xFF11161C),
+      child: Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Text(
+            _status.isEmpty ? _s.cameraNotStarted : _status,
+            textAlign: TextAlign.center,
+            style: const TextStyle(
+              color: Colors.white70,
+              fontSize: 16,
+              height: 1.5,
             ),
           ),
-          // Draw threshold (slider) vs speak floor are different concerns.
-          Text(
-            _s.speakFloor(kMinSpeakScore.toStringAsFixed(2)),
-            style: style.copyWith(color: Colors.white70),
-          ),
-        ],
+        ),
       ),
     );
   }
 
-  /// 显示这一帧的坐标假设。框画偏时**第一眼**要看这里：
-  /// 帧尺寸或旋转角错了，映射必然错，而且不会有任何报错。
-  Widget _fitDebug(DisplayFit fit) {
-    final style = const TextStyle(color: Colors.white70, fontSize: 10);
-    return _glass(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.end,
-        mainAxisSize: MainAxisSize.min,
-        children: <Widget>[
-          Text(
-            '${_s.frame} ${_frameSize.width.toInt()}x${_frameSize.height.toInt()}',
-            style: style,
-          ),
-          Text('${_s.rotation} $_rotationDegrees°', style: style),
-          Text('${_s.scale} ${fit.scale.toStringAsFixed(3)}', style: style),
-          Text(
-            '${_s.letterbox} ${fit.dx.toStringAsFixed(0)},${fit.dy.toStringAsFixed(0)}',
-            style: style,
-          ),
-        ],
-      ),
-    );
-  }
-
-  /// 把无效检测的分类计数渲染成一行短文本，例如 `score_out_of_range=8400`。
-  ///
-  /// 单独成方法而不是写成嵌套插值：嵌套引号极易出错，而这里又只是字符串拼接。
-  String _invalidReasonText() {
-    final m = _diagnostics?.invalidByReason ?? const <String, int>{};
-    if (m.isEmpty) return _s.uncategorized;
-    return m.entries.map((e) => '${e.key}=${e.value}').join(' ');
-  }
-
-  Widget _glass({required Widget child}) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-      decoration: BoxDecoration(
-        color: Colors.black.withValues(alpha: 0.55),
-        borderRadius: BorderRadius.circular(6),
-      ),
-      child: child,
-    );
-  }
-
-  // ------------------------------------------------------------- 状态条
-
-  Widget _statusBar() {
-    final color = _sourceReady ? Colors.greenAccent : Colors.orangeAccent;
+  /// 底部動作區。**整張畫面只有兩個可操作項**（引導中時），
+  /// 未啟動時只有一個。
+  Widget _actionArea() {
     return Container(
       width: double.infinity,
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       color: const Color(0xFF161B22),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: <Widget>[
-          Row(
-            children: <Widget>[
-              Icon(
-                _sourceReady ? Icons.check_circle : Icons.warning_amber,
-                size: 16,
-                color: color,
-              ),
-              const SizedBox(width: 6),
-              Expanded(
-                child: Text(
-                  _statusText,
-                  style: TextStyle(color: color, fontSize: 12),
-                  // 不限制行数：状态里有失败原因时，截断会让人只看到「模型未加载」
-                  // 而看不到「为什么」。之前用 maxLines: 2 就吃过这个亏。
-                  softWrap: true,
-                ),
-              ),
-            ],
-          ),
-          // 失败原因单独一块，**完整**显示，且长按可复制。
-          // 理由：这类错误只在真机上出现，用户没有 logcat 可用；
-          // 把完整文本摆在屏幕上、允许复制，比让他去翻日志现实得多。
-          if (!_sourceReady && _statusError != null)
-            Padding(
-              padding: const EdgeInsets.only(top: 6),
-              child: GestureDetector(
-                onLongPress: () async {
-                  await Clipboard.setData(ClipboardData(text: _statusError!));
-                  if (!mounted) return;
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(
-                      content: Text(_s.errorCopied),
-                      duration: const Duration(seconds: 2),
-                    ),
-                  );
-                },
-                child: Container(
-                  width: double.infinity,
-                  padding: const EdgeInsets.all(8),
-                  decoration: BoxDecoration(
-                    color: Colors.black.withValues(alpha: 0.4),
-                    border: Border.all(color: color.withValues(alpha: 0.5)),
-                    borderRadius: BorderRadius.circular(6),
-                  ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: <Widget>[
-                      Row(
-                        children: <Widget>[
-                          Expanded(
-                            child: Text(
-                              _s.sourceInitFailed(
-                                _source?.displayName ?? _s.sourceFallback,
-                              ),
-                              style: TextStyle(
-                                color: color,
-                                fontSize: 11,
-                                fontWeight: FontWeight.w600,
-                              ),
-                            ),
-                          ),
-                          Icon(Icons.copy, size: 13, color: color),
-                        ],
-                      ),
-                      const SizedBox(height: 4),
-                      SelectableText(
-                        _statusError!,
-                        style: const TextStyle(
-                          color: Colors.white70,
-                          fontSize: 10,
-                          height: 1.35,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-        ],
-      ),
-    );
-  }
-
-  // ------------------------------------------------------------- 控制面板
-
-  Widget _controlPanel() {
-    return Container(
-      color: const Color(0xFF161B22),
-      padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
+      padding: const EdgeInsets.fromLTRB(16, 14, 16, 16),
       child: Column(
         mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: <Widget>[
-          Row(
-            children: <Widget>[
-              Text(_s.displayThreshold,
-                  style: const TextStyle(color: Colors.white70, fontSize: 12)),
-              Expanded(
-                child: Slider(
-                  value: _threshold,
-                  min: 0.05,
-                  max: 0.95,
-                  divisions: 18,
-                  label: _threshold.toStringAsFixed(2),
-                  onChanged: (v) {
-                    setState(() => _threshold = v);
-                    // 只写一处：来源自己负责把阈值应用到它的过滤逻辑
-                    // （相机推给原生、假源在 Dart 内过滤）。
-                    // UI 不再各写一份——两处各写是「滑动条不生效」的成因。
-                    _source?.threshold = v;
-                  },
-                ),
-              ),
-              SizedBox(
-                width: 42,
-                child: Text(
-                  _threshold.toStringAsFixed(2),
-                  style: const TextStyle(color: Colors.white, fontSize: 13),
-                ),
-              ),
-            ],
-          ),
+          if (_guiding) _statusLine() else _startButton(),
+          const SizedBox(height: 12),
           Row(
             children: <Widget>[
               Expanded(
-                child: SegmentedButton<SourceMode>(
-                  segments: <ButtonSegment<SourceMode>>[
-                    ButtonSegment<SourceMode>(
-                      value: SourceMode.camera,
-                      label: Text(_s.camera),
-                      icon: const Icon(Icons.photo_camera, size: 16),
-                    ),
-                    ButtonSegment<SourceMode>(
-                      value: SourceMode.mock,
-                      label: Text(_s.fakeData),
-                      icon: const Icon(Icons.grid_on, size: 16),
-                    ),
-                  ],
-                  selected: <SourceMode>{_mode},
-                  onSelectionChanged: (s) async {
-                    // 不再按种类写两个分支去调各自的启动函数：
-                    // 切换来源统一走 _switchSource，它内部同等地处理
-                    // 「停旧的、起新的、重接流与诊断」。
-                    if (s.first == _mode) return;
-                    await _switchSource(s.first);
-                  },
-                ),
+                child: _voiceButton(),
               ),
-              const SizedBox(width: 8),
-              IconButton(
-                tooltip: _speakEnabled ? _s.muteSpeak : _s.unmuteSpeak,
-                onPressed: () => setState(() => _speakEnabled = !_speakEnabled),
-                icon: Icon(
-                  _speakEnabled ? Icons.volume_up : Icons.volume_off,
-                  color: _speakEnabled ? Colors.greenAccent : Colors.white38,
-                ),
-              ),
-              IconButton(
-                tooltip: _showLabels ? _s.hideLabels : _s.showLabels,
-                onPressed: () => setState(() => _showLabels = !_showLabels),
-                icon: Icon(
-                  _showLabels ? Icons.label : Icons.label_off,
-                  color: Colors.white70,
-                ),
-              ),
-              IconButton(
-                tooltip: _capturing ? _s.stopCapture : _s.startCapture,
-                onPressed: _toggleCapture,
-                icon: Icon(
-                  _capturing ? Icons.camera : Icons.camera_outlined,
-                  color: _capturing ? Colors.orangeAccent : Colors.white70,
-                ),
-              ),
-              // 帳號 / 登入。放在最後，與其他導覽類動作分開。
-              // tooltip 就是螢幕閱讀器會唸出的標籤，所以它必須是有意義的字，
-              // 不能是空的（空的 IconButton 對全盲使用者等於不存在）。
-              IconButton(
-                tooltip: AuthStrings.current.accountTitle,
-                onPressed: _openAuth,
-                icon: const Icon(Icons.person_outline, color: Colors.white70),
-              ),
+              if (_guiding) ...<Widget>[
+                const SizedBox(width: 12),
+                Expanded(child: _stopButton()),
+              ],
             ],
           ),
-          if (_capturing || _captureCount > 0)
-            Padding(
-              padding: const EdgeInsets.only(top: 4),
-              child: Text(
-                _s.captureSavedCount(_captureCount),
-                style: TextStyle(
-                  color: _capturing ? Colors.orangeAccent : Colors.white54,
-                  fontSize: 12,
-                ),
-              ),
-            ),
-          if (_announcer.history.isNotEmpty) _announceLog(),
         ],
       ),
     );
   }
 
-  /// 播报决策日志。展示「为什么播/为什么跳过」，
-  /// 是两级防抖真的在工作的直接证据。
-  Widget _announceLog() {
-    final recent = _announcer.history.reversed.take(3).toList();
-    return Padding(
-      padding: const EdgeInsets.only(top: 6),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: <Widget>[
-          for (final a in recent)
-            Text(
-              '${a.at.hour.toString().padLeft(2, '0')}:'
-              '${a.at.minute.toString().padLeft(2, '0')}:'
-              '${a.at.second.toString().padLeft(2, '0')}  '
-              '${labelDisplayName(a.label)}  ${a.reason}',
-              style: TextStyle(
-                fontSize: 11,
-                color: _s.reasonIsSkip(a.reason)
-                    ? Colors.white38
-                    : Colors.greenAccent,
-              ),
-            ),
-        ],
+  /// 狀態列。這是**低視力使用者與陪護者**看的那一句；
+  /// 全盲使用者聽的是同一件事的語音版本。
+  Widget _statusLine() {
+    final text = _status.isEmpty ? _s.guiding : _status;
+    return Semantics(
+      liveRegion: true,
+      child: Text(
+        text,
+        textAlign: TextAlign.center,
+        maxLines: 2,
+        overflow: TextOverflow.ellipsis,
+        style: const TextStyle(color: Colors.white70, fontSize: 14, height: 1.4),
       ),
     );
   }
-}
 
-/// 假数据模式的背景网格，让框的位移幅度可直接目视比较。
-class _GridPainter extends CustomPainter {
-  @override
-  void paint(Canvas canvas, Size size) {
-    final p = Paint()
-      ..color = const Color(0xFF23303C)
-      ..strokeWidth = 1;
-    const step = 40.0;
-    for (var x = 0.0; x <= size.width; x += step) {
-      canvas.drawLine(Offset(x, 0), Offset(x, size.height), p);
-    }
-    for (var y = 0.0; y <= size.height; y += step) {
-      canvas.drawLine(Offset(0, y), Offset(size.width, y), p);
-    }
-    final c = Paint()
-      ..color = const Color(0xFF2F4256)
-      ..strokeWidth = 2;
-    canvas.drawLine(
-      Offset(size.width / 2, 0),
-      Offset(size.width / 2, size.height),
-      c,
-    );
-    canvas.drawLine(
-      Offset(0, size.height / 2),
-      Offset(size.width, size.height / 2),
-      c,
-    );
-    // 四角标记，用来核对框的边界夹紧是否正确
-    final corner = Paint()
-      ..color = const Color(0xFF3E566E)
-      ..strokeWidth = 3;
-    const l = 18.0;
-    canvas.drawLine(Offset.zero, const Offset(l, 0), corner);
-    canvas.drawLine(Offset.zero, const Offset(0, l), corner);
-    canvas.drawLine(
-      Offset(size.width, size.height),
-      Offset(size.width - l, size.height),
-      corner,
-    );
-    canvas.drawLine(
-      Offset(size.width, size.height),
-      Offset(size.width, size.height - l),
-      corner,
-    );
-    canvas.drawCircle(
-      Offset(size.width / 2, size.height / 2),
-      3,
-      Paint()..color = const Color(0xFF4C6B87),
+  /// 主按鈕。**標籤即結果**——不用「開始」這種模糊詞。
+  ///
+  /// 高度刻意做大（56）：這是這張畫面上唯一的強調動作，
+  /// 而低視力使用者的觸控精確度通常較差。
+  Widget _startButton() {
+    return SizedBox(
+      height: 56,
+      child: FilledButton.icon(
+        onPressed: _guiding ? null : _startGuidance,
+        icon: const Icon(Icons.play_arrow, size: 26),
+        label: Text(
+          _s.startGuidance,
+          style: const TextStyle(fontSize: 19, fontWeight: FontWeight.w600),
+        ),
+      ),
     );
   }
 
-  @override
-  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
+  /// 語音開關。label 是**動作 + 結果**（「開啟語音」），不是狀態——
+  /// 螢幕閱讀器唸的是「按下去會發生什麼」。
+  Widget _voiceButton() {
+    return SizedBox(
+      height: 48,
+      child: OutlinedButton.icon(
+        onPressed: () {
+          setState(() => _speakEnabled = !_speakEnabled);
+          _announcer.enabled = _speakEnabled;
+          if (!_speakEnabled) {
+            // 關掉語音時必須立刻停掉正在說的那句，否則使用者按了「關閉」
+            // 卻還聽到聲音，會以為按鈕沒作用。
+            unawaited(_speaker.stop());
+          }
+          _say(_speakEnabled ? _s.voiceOn : _s.voiceOff);
+        },
+        icon: Icon(
+          _speakEnabled ? Icons.volume_up : Icons.volume_off,
+          size: 22,
+        ),
+        label: Text(_speakEnabled ? _s.disableVoice : _s.enableVoice),
+      ),
+    );
+  }
+
+  Widget _stopButton() {
+    return SizedBox(
+      height: 48,
+      child: OutlinedButton.icon(
+        onPressed: _stopGuidance,
+        icon: const Icon(Icons.stop, size: 22),
+        label: Text(_s.stopGuidance),
+      ),
+    );
+  }
 }

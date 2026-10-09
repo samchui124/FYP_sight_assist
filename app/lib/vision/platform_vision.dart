@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io' show Platform;
 // Size 来自 dart:ui。分析器曾提示此导入「多余」（理由：services.dart 已提供
 // 全部用到的符号），但那依赖 flutter 内部的再导出链——我核对了
 // services.dart 与 asset_bundle.dart 的 export 列表，没有直接看到 Size。
@@ -54,11 +55,20 @@ class PlatformVision implements VisionSource {
     MethodChannel? method,
     EventChannel? events,
     this.rotationDegrees = 90,
+    bool? supportsTextReading,
   })  : _method = method ?? const MethodChannel(kVisionChannel),
-        _events = events ?? const EventChannel(kFrameChannel);
+        _events = events ?? const EventChannel(kFrameChannel),
+        // 預設依平台推斷：目前只有 Android 的 VisionPlugin 有 readText。
+        // 做成可覆寫的參數是為了讓呼叫端（與測試）能明確表達，
+        // 而不是散在各處寫 `Platform.isAndroid`。
+        _supportsTextReading = supportsTextReading ?? Platform.isAndroid;
 
   final MethodChannel _method;
   final EventChannel _events;
+
+  /// 見 [supportsTextReading]。宣告在欄位區而不是散在方法附近，
+  /// 因為 Dart 的初始化列表只能寫給**已宣告**的欄位。
+  final bool _supportsTextReading;
 
   /// 把原始帧转正所需的顺时针角度。
   ///
@@ -345,6 +355,27 @@ class PlatformVision implements VisionSource {
     }
   }
 
+  /// 應用私有可寫目錄（原生 `modelDir` 通道）。
+  ///
+  /// 為什麼需要對外開放：診斷狀態檔要寫在這裡（見 `diag/status_log.dart`）。
+  /// 不用 `path_provider`——它會拉進 `objective_c`，而本倉庫路徑含空格，
+  /// 那會讓 build hook 失敗（`pubspec.yaml` 記著這件事）。
+  ///
+  /// 回傳 null 表示原生沒給（例如通道尚未實作）；呼叫方應優雅地放棄寫檔，
+  /// **不是**讓引導失敗。
+  Future<String?> appFilesDir() async {
+    try {
+      return await _method.invokeMethod<String>(VisionMethods.modelDir);
+    } on PlatformException catch (e) {
+      // 診斷用途失敗不該往上拋：它與「能不能引導」無關。
+      // ignore: avoid_print
+      print('[PathGuide] appFilesDir 失敗：${e.code} ${e.message}');
+      return null;
+    } on MissingPluginException {
+      return null;
+    }
+  }
+
   Future<String> _materializeModelToDisk(String assetKey) async {
     final dir = await _method.invokeMethod<String>(VisionMethods.modelDir);
     if (dir == null || dir.isEmpty) {
@@ -387,6 +418,17 @@ class PlatformVision implements VisionSource {
       return CaptureResult.fail('当前平台尚未实现视觉插件');
     }
   }
+
+  /// 本平台是否實作了「讀字」（OCR）。
+  ///
+  /// 為什麼要有這個旗標，而不是直接呼叫、失敗就算了：
+  /// **iOS 側尚未實作 `readText`**（見 `ios/Runner/VisionPlugin.swift`）。
+  /// 沒有旗標時，iPhone 上會每 1.5 秒走一次機會式排程、穿過平台通道、
+  /// 拿到一個 `MissingPluginException`——**看起來像壞掉，其實只是還沒做**，
+  /// 而且那個成本是白花的（每秒都在問一件永遠不會成功的事）。
+  ///
+  /// 值由建構子決定（預設依平台推斷），不散在各處寫 `Platform.isAndroid`。
+  bool get supportsTextReading => _supportsTextReading;
 
   /// 读最近一帧相机原图上的文字（招牌、门牌、指示牌）。
   ///

@@ -202,6 +202,48 @@ class AppStrings {
 
   String webCameraStartFailed(Object error) =>
       _zh ? '啟動瀏覽器相機失敗：$error' : 'Failed to start browser camera: $error';
+
+  // --- 產品畫面（單一畫面）---
+  //
+  // 這些是**使用者會聽到**的句子，所以每一條都要能只靠聽就懂。
+  // 命名原則：標籤即結果，不用「開始」「確定」這類模糊詞
+  //（見 docs/A11Y-ENTRY-AND-AUTH.md 的驗收清單）。
+
+  /// 主按鈕：相機尚未就緒時。
+  String get startGuidance => _zh ? '啟動引導' : 'Start guidance';
+
+  /// 按下「啟動引導」之後的即時回饋。**先出聲再做事**——
+  /// 這個專案把「按了之後沒反應」列為最嚴重的缺口。
+  String get starting => _zh ? '正在啟動引導' : 'Starting guidance';
+
+  /// 引導中，狀態列文字（也會被唸出來）。
+  String get guiding => _zh ? '正在引導，前方有障礙物會出聲' : 'Guiding — obstacles will be announced';
+
+  /// 引導已停止（回到未啟動狀態）。
+  String get guidanceStopped => _zh ? '已停止引導' : 'Guidance stopped';
+
+  /// 語音開關的標籤：label 是**動作 + 結果**，不是狀態。
+  /// 螢幕閱讀器唸的是「要按下去會發生什麼」，不是「現在是什麼」。
+  String get enableVoice => _zh ? '開啟語音' : 'Turn voice on';
+
+  String get disableVoice => _zh ? '關閉語音' : 'Turn voice off';
+
+  /// 停止引導。label 同樣是動作 + 結果。
+  String get stopGuidance => _zh ? '結束引導' : 'End guidance';
+
+  /// 點下語音開關後的確認（讓使用者知道按到了）。
+  String get voiceOn => _zh ? '語音已開啟' : 'Voice on';
+
+  String get voiceOff => _zh ? '語音已關閉' : 'Voice off';
+
+  /// 讀到招牌時唸出的前置詞。**必須加**，否則使用者分不清
+  /// 「前面有樓梯」（障礙物）與「麥當勞」（招牌）——兩者都是名詞。
+  String get readSignPrefix => _zh ? '招牌寫著' : 'Sign reads';
+
+  /// 出現率很低的事實陳述，用完整句避免被聽成指令。
+  String get noCameraOnDevice => _zh
+      ? '這台裝置沒有可用的相機，引導無法啟動'
+      : 'No camera available on this device, so guidance cannot start';
 }
 
 /// Localized display / speak name for a detection label.

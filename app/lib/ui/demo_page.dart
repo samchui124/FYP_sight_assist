@@ -84,6 +84,14 @@ class _DemoPageState extends State<DemoPage> with WidgetsBindingObserver {
   /// 引導是否在跑。false 時畫面上才有「啟動引導」那顆按鈕。
   bool _guiding = false;
 
+  /// 這次「停止引導」是不是因為切到背景造成的。
+  ///
+  /// 用來區分兩種停止：**使用者按了「結束引導」**（回來時不該自己開始）
+  /// 與**系統把我們切到背景**（回來時應該恢復）。不分開的話，
+  /// 只能二選一：要嘛使用者按了停、回來又被擅自啟動，
+  /// 要嘛切出去再回來就一直是停的。
+  bool _pausedByLifecycle = false;
+
   /// 採集：把相機原圖定時存進應用私有目錄，供之後的雲端標註迴路使用。
   ///
   /// ## 為什麼它是使用者按得到的按鈕，而不是背景自動跑
@@ -136,10 +144,23 @@ class _DemoPageState extends State<DemoPage> with WidgetsBindingObserver {
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    // 切到背景就別再讀字了：相機停了、lastCapture 也不再更新，
-    // 繼續排程只是白燒 CPU（而且回來時會唸出一段過期的招牌）。
+    // 切到背景就停：相機停了、`lastCapture` 也不再更新，
+    // 繼續排程讀字只是白燒 CPU，而且回來時會唸出一段過期的招牌。
     if (state == AppLifecycleState.paused && _guiding) {
-      _stopGuidance();
+      _pausedByLifecycle = true;
+      _stopGuidance(byLifecycle: true);
+      return;
+    }
+    // ★ 回到前景必須**自己恢復**。
+    //
+    // 少了這一段，使用者切去別的地方再回來，畫面會停在「已停止引導」，
+    // 而且沒有任何東西會把它叫回來——**看起來像 App 壞了**。
+    // SystemChrome / Flutter 不會幫我們重啟相機，這件事只有這裡能做。
+    if (state == AppLifecycleState.resumed &&
+        _pausedByLifecycle &&
+        !_guiding) {
+      _pausedByLifecycle = false;
+      unawaited(_startGuidance());
     }
   }
 
@@ -231,6 +252,10 @@ class _DemoPageState extends State<DemoPage> with WidgetsBindingObserver {
 
   /// 停止引導：拆掉相機、停止語音、清掉畫面。
   ///
+  /// `byLifecycle` 區分「系統切到背景」與「使用者按了結束引導」——
+  /// 只有前者會在下一次回到前景時自動恢復（見 [didChangeAppLifecycleState]）。
+  /// 使用者自己按了停，回來時**不該**被擅自啟動。
+  ///
   /// ## ★ 為什麼這裡**不** await `cancel()` 與 `dispose()`
   ///
   /// 這是本方法最重要的一點，而且是被測試抓出來的：
@@ -246,11 +271,15 @@ class _DemoPageState extends State<DemoPage> with WidgetsBindingObserver {
   ///
   /// 收音機不會因為清理慢半拍而繼續運作：`_source` 一設成 null，
   /// `_onFrame` 的來源就沒了，而且 `_guiding` 已經變 false。
-  void _stopGuidance() {
+  void _stopGuidance({bool byLifecycle = false}) {
     final sub = _sub;
     final old = _source;
     _sub = null;
     _source = null;
+
+    // 使用者自己按的「結束引導」要清掉恢復意圖；切背景造成的停則保留它，
+    // 等 [didChangeAppLifecycleState] 在回到前景時恢復。
+    if (!byLifecycle) _pausedByLifecycle = false;
 
     // 採集要跟著引導停：相機沒了之後它只會一直拿到「尚無相機幀」的失敗，
     // 而每一次都會唸一句錯誤給使用者聽。

@@ -587,7 +587,22 @@ class VisionPlugin(
     }
 
     fun startCameraIfPossible() {
-        val view = currentPreview ?: return
+        // ★ 这里有**两个**前置条件，而且它们的就绪顺序不确定：
+        //   - `detector != null`：模型由 Dart 侧异步落盘后再加载
+        //   - `currentPreview != null`：预览平台视图由 widget 树建立
+        // 任何一方先到都只是「还不行」，**不当成错误**——真正的启动发生在
+        // 两者都就绪的那一次调用（三条路径都会调它：模型加载完、权限回调、
+        // 预览建立）。真机实测日志里可以看到它被调用 4 次，最后一次才成功启动。
+        //
+        // 这段诊断保留：它一眼就能区分「模型没就绪」「预览没就绪」「权限被拒」
+        // 三种都表现为「一片黑」的原因，而那是本项目花过很多轮才查清的一类故障。
+        val view = currentPreview
+        Log.i(
+            TAG,
+            "startCameraIfPossible: preview=${view != null} " +
+                "detector=${detector != null} perm=${hasCameraPermission()}",
+        )
+        if (view == null) return
         if (detector == null) return
         // 每次**动态**检查权限。缓存这个结果会导致：用户在 Dart 侧授权之后，
         // 原生侧仍认为无权限，相机永远不启动，屏幕上只有一片黑、也没有异常。

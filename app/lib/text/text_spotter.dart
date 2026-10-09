@@ -407,12 +407,114 @@ class TextSpotter {
     return true;
   }
 
-  /// 把文字裁到可唸的長度。超過就截斷並加提示。
+  /// 把讀到的文字切成**可逐句唸**的片段。
   ///
-  /// 為什麼要裁：整塊招牌的全文可能上百字，唸完會讓使用者站在原地等，
-  /// 而且會蓋掉所有障礙物播報。寧可先給最前面這一段。
-  static String clip(String text, {int max = 40}) {
-    if (text.length <= max) return text;
-    return '${text.substring(0, max)}…';
+  /// ## 為什麼一定要切（這是「沒有斷句、沒有間隔」的修法）
+  ///
+  /// 原本的做法是把整段文字**一次丟給 TTS**。兩個問題：
+  ///
+  /// 1. **沒有停頓**：`"麥當勞 McDonald's 出口 EXIT 往彩明商場"` 這樣一路唸下去，
+  ///    聽起來是一串沒有邊界的聲音，使用者分不出哪裡是一個資訊的結束。
+  /// 2. **一唸就很久**：菜單或商場指南動輒上百字，唸完要好幾十秒，
+  ///    期間**所有障礙物播報都被擋住**——那正是我們最不想發生的事。
+  ///
+  /// 切成一句一句之後，每一句都是獨立的發聲單元，`flutter_tts` 的佇列模式
+  /// 會讓它們**依序唸完並自然停頓**。使用者也因此能在任何一句之後
+  /// 被障礙物播報打斷——安全性和可讀性同時改善。
+  ///
+  /// ## 切點
+  ///
+  /// 1. **換行**（ML Kit 的行邊界是最可靠的切點，也是畫面上的行）
+  /// 2. **句末標點**（。！？；!?;）
+  ///
+  /// 太短的片段會與下一句合併，避免「唸兩個字停一下」這種破碎節奏。
+  static List<String> toChunks(String text, {int minChunk = 4, int maxChunk = 30}) {
+    final t = text.replaceAll('\r', '').trim();
+    if (t.isEmpty) return const <String>[];
+
+    // 先按換行切——**這是最重要的切點**，因為那正是畫面上的行邊界。
+    final rough = <String>[];
+    for (final line in t.split('\n')) {
+      final s = line.trim();
+      if (s.isEmpty) continue;
+      for (final piece in s.split(RegExp(r'(?<=[。！？；!?;])'))) {
+        final p = piece.trim();
+        if (p.isNotEmpty) rough.add(p);
+      }
+    }
+
+    // 合併過短的片段。
+    final out = <String>[];
+    final buf = StringBuffer();
+    for (final p in rough) {
+      final pending = buf.toString();
+      if (pending.isEmpty) {
+        buf.write(p);
+      } else if (pending.length < minChunk) {
+        buf.write(' ');
+        buf.write(p);
+      } else {
+        out.add(pending);
+        buf.clear();
+        buf.write(p);
+      }
+    }
+    if (buf.isNotEmpty) out.add(buf.toString());
+
+    // 把仍過長的片段切到 maxChunk 以內。
+    final capped = <String>[];
+    for (final m in out) {
+      capped.addAll(_wrap(m, maxChunk));
+    }
+    return capped;
+  }
+
+  /// 把一段過長的文字切到 [max] 以內，**優先切在自然斷點**。
+  ///
+  /// 為什麼不能只是每 N 個字硬切：那會把詞切一半（`"往彩明商"` + `"場"`），
+  /// 聽起來像講錯話。所以順序是：
+  ///   1. 中文標點（、，；：）
+  ///   2. 空白（英文詞邊界）
+  ///   3. 真的都沒有才硬切
+  static List<String> _wrap(String s, int max) {
+    if (s.length <= max) return <String>[s];
+    final out = <String>[];
+    var rest = s;
+    while (rest.length > max) {
+      final window = rest.substring(0, max);
+      var cut = -1;
+      // 1. 中文標點
+      for (final sep in <String>['、', '，', ',', '；', ';', '：', ':']) {
+        final i = window.lastIndexOf(sep);
+        if (i > cut) cut = i;
+      }
+      // 2. 空白
+      if (cut < 1) {
+        final i = window.lastIndexOf(' ');
+        if (i > cut) cut = i;
+      }
+      // 3. 硬切
+      final at = cut >= 1 ? cut + 1 : max;
+      out.add(rest.substring(0, at).trim());
+      rest = rest.substring(at).trim();
+    }
+    if (rest.isNotEmpty) out.add(rest);
+    return out.where((e) => e.isNotEmpty).toList();
+  }
+
+  /// 把片段的長度總和限制在 [maxTotal] 以內，超出就丟掉後面的。
+  ///
+  /// 為什麼要有總量上限：切成逐句之後，最壞情況仍可能排隊幾十句，
+  /// 那會讓障礙物播報被擋住很久。這是**安全閥**，不是長度偏好。
+  /// 使用者若要聽完整內容，再對準一次即可（機會式讀字會重讀）。
+  static List<String> capTotal(List<String> chunks, {int maxTotal = 160}) {
+    final out = <String>[];
+    var total = 0;
+    for (final c in chunks) {
+      if (total + c.length > maxTotal && out.isNotEmpty) break;
+      out.add(c);
+      total += c.length;
+    }
+    return out;
   }
 }

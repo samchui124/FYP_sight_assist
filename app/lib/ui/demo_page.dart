@@ -432,20 +432,37 @@ class _DemoPageState extends State<DemoPage> with WidgetsBindingObserver {
       final spot = await _spotter.tick(detections);
       if (spot == null || !spot.hasText || !mounted) return;
 
-      // ★ 安全閥：招牌**永遠不能**蓋掉障礙物播報。
+      // ★ 逐句唸，而不是整段一次丟出去。
       //
-      // 香港街頭的招牌很密集，讀到就唸的結果會是使用者一直聽到店名，
-      // 而「前面有樓梯」被蓋掉。所以讓位給障礙物——晚幾秒唸招牌沒人受傷，
-      // 樓梯沒唸會。見 Announcer.canSpeakText。
-      final said = _announcer.speakText(
-        '${_s.readSignPrefix}${TextSpotter.clip(spot.text)}',
-        // 不打斷：若正在說話，就等下一輪。
-        interrupt: false,
-      );
-      if (said) {
-        // 只有真的唸出去才進重複冷卻。沒唸到就讓它下一輪再試，
-        // 否則那塊招牌會永遠不再被念。
-        _spokenCount++;
+      // 兩個理由，都是真機回報的問題：
+      //  1. 整段一次唸**沒有任何停頓**，使用者分不出哪裡是一個資訊的結束
+      //     （「沒有斷句沒有間隔」）。
+      //  2. 菜單／商場指南上百字一次唸要好幾十秒，期間所有障礙物播報被擋住。
+      //
+      // `flutter_tts` 的佇列模式（`setQueueMode(0)`）會讓這些片段依序唸完、
+      // 自然停頓，而且任何一句之後都能被障礙物播報插進來。
+      final chunks = TextSpotter.capTotal(TextSpotter.toChunks(spot.text));
+      if (chunks.isEmpty) return;
+
+      // ★ 安全閥：招牌**永遠不能**蓋掉障礙物播報。障礙物正在出聲時整批讓位。
+      if (!_announcer.beginTextBatch()) {
+        _spotter.defer();
+        return;
+      }
+
+      // 第一句要加「招牌寫著」；後續句子不加——否則每一句前面都重複一次，
+      // 聽起來很吵，而且會拉長總時長。
+      final prefix = _s.readSignPrefix;
+      var said = 0;
+      for (var i = 0; i < chunks.length; i++) {
+        final text = i == 0 ? '$prefix${chunks[i]}' : chunks[i];
+        if (!_announcer.enqueueText(text)) break; // 被讓位就停，剩下的不唸
+        said++;
+      }
+
+      if (said > 0) {
+        _spokenCount += said;
+        _announcer.endTextBatch();
         _spotter.markSpoken();
       } else {
         _spotter.defer();

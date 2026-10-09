@@ -84,6 +84,7 @@ class TextReadResult {
   const TextReadResult({
     required this.ok,
     this.text = '',
+    this.lines = const <String>[],
     this.elements = const <TextElement>[],
     this.width = 0,
     this.height = 0,
@@ -97,6 +98,13 @@ class TextReadResult {
 
   /// 整帧文字，行间以换行连接。这是要**播报**的东西。
   final String text;
+
+  /// 逐行文字（畫面上的每一行）。
+  ///
+  /// 為什麼要單獨留著而不是只在 [text] 裡用換行表示：
+  /// Dart 側要用**行邊界**來斷句——每一行是一個獨立的發聲單元，
+  /// 唸完自然停頓。直接拆字串也行，但原生側已經算好了，何必再拆一次。
+  final List<String> lines;
 
   /// 逐元素结果，用于画框与「哪几个字在哪」。
   final List<TextElement> elements;
@@ -137,10 +145,14 @@ class TextReadResult {
 
     final rawText = raw['text'];
     final rawError = raw['error'];
+    final rawLines = raw['lines'];
 
     return TextReadResult(
       ok: raw['ok'] == true,
       text: rawText is String ? rawText : '',
+      lines: rawLines is List
+          ? rawLines.whereType<String>().toList(growable: false)
+          : const <String>[],
       elements: elements,
       width: _asInt(raw['width']),
       height: _asInt(raw['height']),

@@ -235,40 +235,60 @@ void main() {
   /// 所以用可注入時鐘把它釘死。
   group('識字播報讓位給障礙物', () {
     test('乾淨狀態下可以唸文字', () {
-      expect(announcer.canSpeakText(), isTrue);
-      expect(announcer.speakText('麥當勞'), isTrue);
+      expect(announcer.beginTextBatch(), isTrue);
+      expect(announcer.enqueueText('麥當勞'), isTrue);
       expect(speaker.spoken, <String>['麥當勞']);
     });
 
-    test('★ 障礙物正在出聲時不唸文字（招牌不能切斷「前面有樓梯」）', () async {
+    test('★ 障礙物正在出聲時整批讓位（招牌不能切斷「前面有樓梯」）', () async {
       // 這一條之所以能成立，是因為 `awaitSpeakCompletion(true)` 讓
       // `_speaking` 真的反映「音訊還在播」——在此之前它幾乎立刻變回 false，
       // 這個判斷等於形同虛設。
       //
       // 注意時序：`onFrame` 是**同步**返回的，但 `_speak` 是非同步的，
       // 所以 `isSpeaking` 要等到下一個 microtask 才為 true。
-      // 在 `onFrame` 之後立刻斷言會看到 false——那是測試的錯，不是程式的錯。
       final a = announcer.onFrame(<Detection>[_det(_binP0Id)]);
       expect(a, isNotNull);
 
       while (announcer.isSpeaking) {
-        // 障礙物還在唸：識字必須讓位，且不該插嘴。
-        expect(announcer.canSpeakText(), isFalse,
+        expect(announcer.beginTextBatch(), isFalse,
             reason: '障礙物出聲期間招牌不得插嘴');
-        expect(announcer.speakText('麥當勞'), isFalse);
+        expect(announcer.enqueueText('麥當勞'), isFalse);
         await Future<void>.delayed(Duration.zero);
       }
 
       // 障礙物唸完 → 招牌立刻有機會被唸。
-      expect(announcer.canSpeakText(), isTrue);
-      expect(announcer.speakText('麥當勞'), isTrue);
+      expect(announcer.beginTextBatch(), isTrue);
+      expect(announcer.enqueueText('麥當勞'), isTrue);
       expect(speaker.spoken, <String>['垃圾桶', '麥當勞']);
+    });
+
+    test('★ 同一批的多句都要唸出來（真實缺陷的回歸測試）', () async {
+      // 逐句唸的時候，若每一句都走 speakText（含冷卻檢查），
+      // 第 2 句就會被自己的 3 秒冷卻擋掉，使用者只聽到第一句。
+      // 這就是 enqueueText / beginTextBatch / endTextBatch 存在的理由。
+      expect(announcer.beginTextBatch(), isTrue);
+      expect(announcer.enqueueText('招牌寫著麥當勞'), isTrue);
+      await announcer.lastSpeech;
+      expect(announcer.enqueueText('出口 EXIT'), isTrue);
+      await announcer.lastSpeech;
+      expect(announcer.enqueueText('往彩明商場'), isTrue);
+      await announcer.lastSpeech;
+      announcer.endTextBatch();
+
+      expect(speaker.spoken,
+          <String>['招牌寫著麥當勞', '出口 EXIT', '往彩明商場']);
+
+      // 整批唸完之後才進冷卻。
+      expect(announcer.beginTextBatch(), isFalse);
+      clock.advance(announcer.textCooldown + const Duration(milliseconds: 1));
+      expect(announcer.beginTextBatch(), isTrue);
     });
 
     test('★ 招牌不會被「剛播報過」的冷卻永久擋住（回歸測試）', () async {
       // 這條是針對一個真實缺陷的回歸測試。
       //
-      // 舊版的 canSpeakText 用「距上次障礙物播報 < globalCooldown(5 秒)」判斷，
+      // 舊版用「距上次障礙物播報 < globalCooldown(5 秒)」判斷讓位，
       // 而 `_onFrame` 是在**同一幀**裡先播報障礙物、緊接著處理識字，
       // 所以那個差距**恆等於 0 秒** → 識字 100% 被丟掉。
       // 真機上的表現就是「讀到字，但從來沒有聲音」。
@@ -276,9 +296,9 @@ void main() {
       speaker.spoken.clear();
 
       await announcer.lastSpeech; // 障礙物唸完
-      expect(announcer.canSpeakText(), isTrue,
+      expect(announcer.beginTextBatch(), isTrue,
           reason: '障礙物唸完就該輪到招牌，不該再等 5 秒');
-      expect(announcer.speakText('麥當勞'), isTrue);
+      expect(announcer.enqueueText('麥當勞'), isTrue);
     });
 
     test('時間前進不影響「正在出聲」的判斷', () async {
@@ -288,22 +308,23 @@ void main() {
       while (announcer.isSpeaking) {
         // 就算時鐘推了一大段，只要還在唸就仍然讓位。
         clock.advance(const Duration(seconds: 30));
-        expect(announcer.canSpeakText(), isFalse);
+        expect(announcer.beginTextBatch(), isFalse);
         await Future<void>.delayed(Duration.zero);
       }
-      expect(announcer.canSpeakText(), isTrue);
+      expect(announcer.beginTextBatch(), isTrue);
     });
 
-    test('文字有自己的冷卻，不會連續唸兩段', () async {
-      expect(announcer.speakText('麥當勞'), isTrue);
-      // 不 await 的話 `_speaking` 還是 true（`_speak` 是非同步的），
-      // 下一個斷言會誤判成「被冷卻擋住」。既有測試也是這樣處理的。
+    test('兩批之間有冷卻，不會連續唸兩批', () async {
+      expect(announcer.beginTextBatch(), isTrue);
+      expect(announcer.enqueueText('麥當勞'), isTrue);
       await announcer.lastSpeech;
+      announcer.endTextBatch();
 
-      expect(announcer.speakText('出口'), isFalse, reason: '同一時間只唸一句');
+      expect(announcer.beginTextBatch(), isFalse, reason: '剛唸完一批，要等冷卻');
 
       clock.advance(announcer.textCooldown + const Duration(milliseconds: 1));
-      expect(announcer.speakText('出口'), isTrue);
+      expect(announcer.beginTextBatch(), isTrue);
+      expect(announcer.enqueueText('出口'), isTrue);
     });
 
     test('識字冷卻存在且比障礙物冷卻短（主動想知道 vs 被動必須知道）', () {
@@ -315,28 +336,30 @@ void main() {
 
     test('禁播時文字也不說', () {
       announcer.enabled = false;
-      expect(announcer.canSpeakText(), isFalse);
-      expect(announcer.speakText('麥當勞'), isFalse);
+      expect(announcer.beginTextBatch(), isFalse);
     });
 
     test('空字串不佔用語音', () {
-      expect(announcer.speakText(''), isFalse);
-      expect(announcer.speakText('   '), isFalse);
-      expect(announcer.canSpeakText(), isTrue, reason: '沒有真的說話，不該進冷卻');
+      expect(announcer.enqueueText(''), isFalse);
+      expect(announcer.enqueueText('   '), isFalse);
+      expect(announcer.beginTextBatch(), isTrue, reason: '沒有真的說話，不該進冷卻');
     });
 
     test('reset 會清掉文字冷卻', () async {
-      announcer.speakText('麥當勞');
+      announcer.beginTextBatch();
+      announcer.enqueueText('麥當勞');
       await announcer.lastSpeech;
-      expect(announcer.canSpeakText(), isFalse);
+      announcer.endTextBatch();
+      expect(announcer.beginTextBatch(), isFalse);
 
       announcer.reset();
       expect(announcer.lastTextAt, isNull);
-      expect(announcer.canSpeakText(), isTrue);
+      expect(announcer.beginTextBatch(), isTrue);
     });
 
     test('文字播報不會記進障礙物歷史（那是防抖證據，不該被灌）', () {
-      announcer.speakText('麥當勞');
+      announcer.beginTextBatch();
+      announcer.enqueueText('麥當勞');
       expect(announcer.history, isEmpty);
     });
   });

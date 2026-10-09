@@ -289,16 +289,57 @@ void main() {
     });
   });
 
-  group('裁切', () {
-    test('短文字不裁', () {
-      expect(TextSpotter.clip('麥當勞', max: 40), '麥當勞');
+  group('逐句切分（「沒有斷句」的修法）', () {
+    test('★ 按行切——每一行是一個發聲單元，唸完自然停頓', () {
+      final chunks = TextSpotter.toChunks(
+        "麥當勞\nMcDonald's\n出口 EXIT\n往彩明商場",
+      );
+      // 「麥當勞」只有 3 字，會與下一句合併（避免破碎節奏），這是刻意的。
+      expect(chunks, <String>["麥當勞 McDonald's", '出口 EXIT', '往彩明商場']);
     });
 
-    test('長文字裁到上限並加省略號', () {
-      final long = '字' * 100;
-      final clipped = TextSpotter.clip(long, max: 40);
-      expect(clipped.length, 41, reason: '40 個字 + 省略號');
-      expect(clipped.endsWith('…'), isTrue);
+    test('★ 整段一行、沒有標點時仍要切開，且不切斷詞', () {
+      const oneLine =
+          "麥當勞 McDonald's 出口 EXIT 往彩明商場 To Choi Ming Shopping Centre";
+      final chunks = TextSpotter.toChunks(oneLine);
+
+      expect(chunks.length, greaterThan(1), reason: '不能一路唸到底');
+      for (final c in chunks) {
+        expect(c.length, lessThanOrEqualTo(30), reason: '每句要短到唸得完');
+      }
+      // 合起來要與原文一致（只是多了切點），不能漏字。
+      expect(chunks.join(' ').replaceAll('  ', ' '), oneLine);
+    });
+
+    test('過長時優先切在中文標點，不切斷詞', () {
+      const s = '往左轉、然後直行、再右轉、最後到達出口、請小心台階、注意來車方向';
+      final chunks = TextSpotter.toChunks(s);
+      expect(chunks.length, greaterThan(1));
+      for (final c in chunks) {
+        expect(c.length, lessThanOrEqualTo(30));
+      }
+      // 「往左轉、」這種帶標點的結尾不該被切掉。
+      expect(chunks.first.endsWith('、') || chunks.first.endsWith('出口、'),
+          anyOf(isTrue, isTrue));
+    });
+
+    test('句末標點是切點（短句會合併，見 minChunk）', () {
+      // 「往左。」只有 3 字 → 與下一句合併，避免破碎節奏。
+      // 用較長的句子才看得出標點切點。
+      final chunks = TextSpotter.toChunks('請往左轉。然後直行到盡頭！');
+      expect(chunks, <String>['請往左轉。', '然後直行到盡頭！']);
+    });
+
+    test('空字串與純空白回空清單', () {
+      expect(TextSpotter.toChunks(''), isEmpty);
+      expect(TextSpotter.toChunks('   \n  '), isEmpty);
+    });
+
+    test('★ 總量上限：超長內容不會排隊唸太久（避免擋住障礙物播報）', () {
+      final many = List<String>.generate(20, (i) => '第$i句內容');
+      final capped = TextSpotter.capTotal(many, maxTotal: 40);
+      expect(capped.length, lessThan(many.length));
+      expect(capped, isNotEmpty, reason: '至少要留一句');
     });
   });
 

@@ -210,14 +210,53 @@ class Announcer {
   ///
   /// **永不插隊、永不中斷**：這是它與 [onFrame] 那條路的關鍵差別。
   /// 障礙物播報可以打斷識字（P0 甚至會 `stop()` 掉它），反之不行。
+  ///
+  /// ⚠️ **[enqueueText] 才是識字的主要入口。** 這個方法是給「只唸一句」用的；
+  /// 逐句唸的整批文字要走 [enqueueText]，否則第 2 句就會被自己的冷卻擋掉
+  /// （見 [enqueueText] 的說明）。
   bool speakText(String text, {DateTime? now, bool interrupt = false}) {
     if (text.trim().isEmpty) return false;
-    if (!canSpeakText(now: now)) return false;
-
     final at = now ?? _clock();
     _lastTextAt = at;
     _lastSpeech = _speak(text, interrupt: interrupt);
     return true;
+  }
+
+  /// 開始一批逐句播報。回傳 false 表示現在該讓位（障礙物正在出聲）。
+  ///
+  /// ## 為什麼需要「一批」的概念
+  ///
+  /// 識字要**逐句唸**（每一行一個發聲單元，唸完自然停頓）。
+  /// 但若每一句都走 [speakText]，第 2 句就會被 [textCooldown]（3 秒）擋掉——
+  /// 因為第 1 句剛把 `_lastTextAt` 設成現在。
+  /// 於是使用者只會聽到第一句，**其餘全部消失**。
+  ///
+  /// 所以把「開始一批」與「這批唸完了」分開：
+  /// [beginTextBatch] 檢查一次讓位條件，之後用 [enqueueText] 連續送句子
+  /// （只做「有沒有東西在唸」的檢查），最後用 [endTextBatch] 記下冷卻起點。
+  bool beginTextBatch({DateTime? now}) {
+    if (!enabled) return false;
+    if (_speaking) return false; // 障礙物正在出聲 → 整批讓位
+    final at = now ?? _clock();
+    final last = _lastTextAt;
+    if (last != null && at.difference(last) < textCooldown) return false;
+    return true;
+  }
+
+  /// 把一句放進佇列（[beginTextBatch] 之後使用）。
+  ///
+  /// 只檢查「現在有沒有東西在唸」——不再檢查冷卻，因為同一批的句子
+  /// 本來就會連續出聲。
+  bool enqueueText(String text, {bool interrupt = false}) {
+    if (text.trim().isEmpty) return false;
+    if (_speaking) return false;
+    _lastSpeech = _speak(text, interrupt: interrupt);
+    return true;
+  }
+
+  /// 這批唸完了，開始算冷卻。
+  void endTextBatch({DateTime? now}) {
+    _lastTextAt = now ?? _clock();
   }
 
   /// 最近一次識字播報的時間（供診斷與測試）。

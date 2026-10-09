@@ -892,6 +892,18 @@ class VisionPlugin(
                 )
             }
 
+            // ★ 逐行回報，而不是把整段壓成一行。
+            //
+            // 為什麼重要：Dart 側要用**行邊界**來斷句（每一行是一個獨立的
+            // 發聲單元，唸完自然停頓）。若這裡把行接成一大串，使用者聽到的
+            // 就是一段沒有間隔的聲音——真機回報的「沒有斷句沒有間隔」正是這樣來的。
+            //
+            // ML Kit 的 `recognized.text` 本來就以換行連接各 block 中的行，
+            // 所以這裡取的就是它；額外提供 `lines` 讓 Dart 側不必自己拆。
+            val lineTexts = recognized.textBlocks.flatMap { block ->
+                block.lines.map { it.text }
+            }
+
             val totalMs = (System.nanoTime() - totalStart) / 1_000_000.0
             Log.i(
                 TAG,
@@ -903,6 +915,7 @@ class VisionPlugin(
             return mapOf(
                 "ok" to true,
                 "text" to recognized.text,
+                "lines" to lineTexts,
                 "elements" to elements,
                 "decodeMs" to decodeMs,
                 "ocrMs" to ocrMs,

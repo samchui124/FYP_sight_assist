@@ -1,4 +1,4 @@
-﻿import 'package:flutter_test/flutter_test.dart';
+import 'package:flutter_test/flutter_test.dart';
 import 'package:pathguide/l10n/app_locale.dart';
 import 'package:pathguide/tts/announcer.dart';
 import 'package:pathguide/vision/detection.dart';

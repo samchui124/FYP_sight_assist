@@ -40,9 +40,51 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ANDROID_APP = REPO_ROOT / "app" / "android" / "app"
 KOTLIN_SRC = ANDROID_APP / "src" / "main" / "kotlin"
-GRADLE_CACHE = REPO_ROOT / ".tools" / "gradle" / "caches" / "modules-2" / "files-2.1"
 JBR = Path(r"C:\Program Files\Android\Android Studio\jbr\bin\java.exe")
 WORK = REPO_ROOT / ".tmp" / "kotlin-compile-check"
+
+
+def gradle_caches() -> list[Path]:
+    """所有可能存在的 Gradle 依賴快取，**依序**回傳。
+
+    ## 為什麼要有多個，而且順序重要
+
+    Gradle 把依賴放在 `$GRADLE_USER_HOME/caches/modules-2/files-2.1`，而
+    `GRADLE_USER_HOME` 在本專案有兩種狀況：
+
+    - 執行了 `.env.ps1`（或由 `flutter run` 帶入）→ 倉庫內的 `.tools/gradle`
+    - 直接跑 `flutter build` → 預設的 `~/.gradle`
+
+    先前這裡**只寫死倉庫內那一個**，於是如果最新的構建走的是 `~/.gradle`，
+    本腳本就會看到一份**過期的快取**：依賴明明已經解析成功，門檻卻報
+    `unresolved reference`。實際踩過一次——加了 ML Kit 之後，快取裡
+    `com.google.mlkit` 只存在於 `~/.gradle`，而舊路徑完全沒有。
+
+    所以改成搜尋全部候選。**清單順序 = 優先順序**，同名 jar 取第一個命中的。
+    """
+    env = os.environ.get("GRADLE_USER_HOME")
+    cands: list[Path] = []
+    if env:
+        cands.append(Path(env) / "caches" / "modules-2" / "files-2.1")
+    cands.append(REPO_ROOT / ".tools" / "gradle" / "caches" / "modules-2" / "files-2.1")
+    home = Path(os.environ.get("USERPROFILE") or Path.home())
+    cands.append(home / ".gradle" / "caches" / "modules-2" / "files-2.1")
+    return [c for c in cands if c.is_dir()]
+
+
+GRADLE_CACHES = gradle_caches()
+# 向後相容：既有的 find_jar / compiler_classpath 用單一路徑。
+GRADLE_CACHE = GRADLE_CACHES[0] if GRADLE_CACHES else (
+    REPO_ROOT / ".tools" / "gradle" / "caches" / "modules-2" / "files-2.1"
+)
+
+
+def rglob_all(pattern: str) -> list[Path]:
+    """在**所有** Gradle 快取裡找符合的檔案。"""
+    out: list[Path] = []
+    for c in GRADLE_CACHES:
+        out.extend(c.rglob(pattern))
+    return out
 
 # 编译器自身需要的 jar（版本要成套，混版本会 NoClassDefFound）
 COMPILER_JARS = [
@@ -62,6 +104,58 @@ PROJECT_AARS = [
     "camera-view-1.6.2.aar", "litert-2.2.0.aar", "litert-api-2.2.0.aar",
     "core-1.13.1.aar", "lifecycle-runtime-2.7.0.aar", "annotation-experimental-1.4.1.aar",
 ]
+
+# ★ ML Kit（OCR）相关的 AAR。用**前缀**匹配而不是写死文件名：ML Kit 的版本
+#   由 Gradle 解析决定（build.gradle.kts 只寫 `16.0.1`，實際拉到的傳遞依賴版本
+#   可能不同），寫死檔名會在下次改版本時變成「門檻報假錯誤」。
+#
+#   為什麼一定要加進這裡：這些 AAR 不進類路徑的話，任何
+#   `import com.google.mlkit...` 的程式碼都會被報 `unresolved reference` ——
+#   **那是門檻的盲點，不是程式碼的錯**。這種假陽性最浪費時間，因為錯誤訊息
+#   長得跟真的編譯錯誤一模一樣。
+#
+#   注意：`vision-common` / `vision-interfaces` 是文字辨識的傳遞依賴；
+#   `play-services-tasks` 提供 `com.google.android.gms.tasks.Task`
+#   （`addOnSuccessListener` 等）——少了它，`process(image)` 的回呼鏈全部解析不到。
+# ★ 這些前綴是**照著 Gradle 實際拉下來的座標**寫的，不是照文件猜的。
+#   確認方式：構建成功後列出 ~/.gradle/caches/modules-2/files-2.1 底下
+#   所有 `.aar`，逐一打開看 `classes.jar` 裡有沒有 ML Kit 的公開類別
+#   （2026-10-09 實際掃過 700 個 archive）。
+#
+#   ★★ 最重要的一條，也是最反直覺的一條：
+#
+#     `com.google.mlkit:text-recognition-chinese:16.0.1` 這個**綁定版座標本身
+#     幾乎是空的**（classes.jar 只有 2 個類別：一個 dynamite ModuleDescriptor
+#     加一個 .properties）。真正的公開 API 是透過它的**傳遞依賴**進來的：
+#
+#       com.google.mlkit.vision.text.TextRecognition  -> play-services-mlkit-text-recognition-common
+#       ...vision.text.chinese.ChineseTextRecognizerOptions
+#                                                     -> play-services-mlkit-text-recognition-chinese
+#       ...vision.text.Text / TextRecognizer 等        -> text-recognition-bundled-common
+#
+#     所以 `import com.google.mlkit.vision.text.TextRecognition` 能不能解析，
+#     取決於類路徑裡有沒有 **play-services-mlkit-text-recognition-common**。
+#     少了它，症狀是 `unresolved reference 'TextRecognition'`——
+#     而 `build.gradle.kts` 裡只寫了 `com.google.mlkit:`，看起來毫不相干。
+#
+#     （「綁定版 vs 未綁定版」的差別不在這裡，見 build.gradle.kts 的說明。）
+PROJECT_AARS_BY_PREFIX = [
+    # 真正的公開 API
+    "play-services-mlkit-text-recognition-common-",
+    "play-services-mlkit-text-recognition-chinese-",
+    # 模型與辨識器實作（bundled-common 17.5 MB，模型就在裡面）
+    "text-recognition-bundled-common-",
+    "text-recognition-chinese-",
+    # 傳遞依賴
+    "vision-common-",
+    "vision-interfaces-",
+    "play-services-tasks-",
+    "play-services-basement-",
+    "play-services-base-",
+    "firebase-annotations-",
+    "common-",
+]
+
 PROJECT_JARS = [
     "guava-*-android.jar",
     "failureaccess-*.jar",
@@ -104,33 +198,36 @@ def android_jar() -> Path | None:
     return best
 
 
+def _version_key(stem: str) -> tuple:
+    """把檔名主體轉成可比較的版本 tuple（非數字段一律算 0）。
+
+    用於「同名多版本時取最大」。之所以不用字串比較：`16.0.1` < `9.0.0`
+    在字串比較下是成立的，會靜默挑到舊版本。
+    """
+    out: list[int] = []
+    for seg in stem.replace("-", ".").split("."):
+        out.append(int(seg) if seg.isdigit() else 0)
+    return tuple(out)
+
+
 def find_jar(name: str, *, exact_suffix: bool = True) -> Path | None:
     """在 Gradle 缓存里找 jar。支持三种写法：
     - 完整文件名（`guava-33.5.0-android.jar`）
     - 不含 .jar 的完整名（`guava-33.5.0-android`）
     - 带通配（`lifecycle-common-*`）
     """
-    if not GRADLE_CACHE.is_dir():
+    if not GRADLE_CACHES:
         return None
     hits: list[Path] = []
     if "*" in name:
-        hits = [p for p in GRADLE_CACHE.rglob("*.jar") if p.match(name)]
+        hits = [p for p in rglob_all("*.jar") if p.match(name)]
     else:
         tail = name if name.endswith(".jar") else f"{name}.jar"
-        hits = [p for p in GRADLE_CACHE.rglob("*.jar") if p.name == tail]
+        hits = [p for p in rglob_all("*.jar") if p.name == tail]
     if not hits:
         return None
     # 同名多版本时取版本号最大的
-    def ver(p: Path) -> tuple:
-        out: list[int] = []
-        for seg in p.stem.replace("-", ".").split("."):
-            if seg.isdigit():
-                out.append(int(seg))
-            else:
-                out.append(0)
-        return tuple(out)
-
-    hits.sort(key=ver)
+    hits.sort(key=lambda p: _version_key(p.stem))
     return hits[-1]
 
 
@@ -139,7 +236,7 @@ def compiler_classpath() -> list[Path]:
     out: list[Path] = []
     for base in COMPILER_JARS:
         # 优先取版本最高的，避免抓到旧版本导致 NoClassDefFound
-        cands = [p for p in GRADLE_CACHE.rglob("*.jar")
+        cands = [p for p in rglob_all("*.jar")
                  if p.name.startswith(f"{base}-") or p.name == f"{base}.jar"]
         if not cands:
             continue
@@ -158,30 +255,54 @@ def compiler_classpath() -> list[Path]:
     return out
 
 
+def extract_aar_classes(aar: Path) -> Path | None:
+    """把 AAR 里的 `classes.jar` 抽到 WORK 下并回傳路徑；抽不到回 None。
+
+    為什麼要抽：kotlinc 的 `-classpath` 只吃 jar/目錄，直接指 AAR 是不會被讀的
+    （而且**不會報錯**，只會表現成「所有符號都找不到」）。
+    """
+    WORK.mkdir(parents=True, exist_ok=True)
+    dest = WORK / aar.stem
+    dest.mkdir(parents=True, exist_ok=True)
+    cj = dest / "classes.jar"
+    if not cj.exists():
+        try:
+            with zipfile.ZipFile(aar) as z:
+                z.extract("classes.jar", dest)
+        except (KeyError, zipfile.BadZipFile):
+            return None
+    return cj
+
+
 def project_classpath() -> list[Path]:
     out: list[Path] = []
-    WORK.mkdir(parents=True, exist_ok=True)
     for aar in PROJECT_AARS:
-        hits = [p for p in GRADLE_CACHE.rglob(aar)]
+        hits = [p for p in rglob_all(aar)]
         if not hits:
             continue
-        dest = WORK / hits[0].stem
-        dest.mkdir(parents=True, exist_ok=True)
-        cj = dest / "classes.jar"
-        if not cj.exists():
-            with zipfile.ZipFile(hits[0]) as z:
-                try:
-                    z.extract("classes.jar", dest)
-                except KeyError:
-                    continue
-        out.append(cj)
+        cj = extract_aar_classes(hits[0])
+        if cj:
+            out.append(cj)
+
+    # 按前綴匹配的 AAR（版本會變，見 PROJECT_AARS_BY_PREFIX 的說明）。
+    # 同名多版本時只取版本號最大的一個——同時放兩份不同版本會讓 kotlinc
+    # 產生「重複類別」警告，且可能挑到舊的那份。
+    for prefix in PROJECT_AARS_BY_PREFIX:
+        cands = [p for p in rglob_all("*.aar") if p.name.startswith(prefix)]
+        if not cands:
+            continue
+        cands.sort(key=lambda p: _version_key(p.stem))
+        cj = extract_aar_classes(cands[-1])
+        if cj:
+            out.append(cj)
+
     for j in PROJECT_JARS:
         p = find_jar(j)
         if p:
             out.append(p)
     # kotlin-stdlib / flutter_embedding 按前缀匹配（版本号会变）
     for prefix, take in PROJECT_JARS_BY_PREFIX:
-        cands = sorted(p for p in GRADLE_CACHE.rglob("*.jar") if p.name.startswith(prefix))
+        cands = sorted(p for p in rglob_all("*.jar") if p.name.startswith(prefix))
         # 排除 -jdk7/-jdk8 之类的变体，只取主 jar
         main = [p for p in cands if not any(
             v in p.name for v in ("-jdk7", "-jdk8", "-sources", "-javadoc"))]
@@ -301,10 +422,16 @@ def main() -> int:
     if not JBR.exists():
         print(f"未找到 JDK：{JBR}")
         return 2
-    if not GRADLE_CACHE.is_dir():
-        print(f"未找到 Gradle 缓存：{GRADLE_CACHE}")
-        print("请先在这台机器上成功构建过一次（或让用户跑一次 flutter run）。")
+    if not GRADLE_CACHES:
+        print("未找到任何 Gradle 依賴快取。已找過：")
+        print(f"  1. $GRADLE_USER_HOME = [{os.environ.get('GRADLE_USER_HOME', '(未設定)')}]")
+        print(f"  2. {REPO_ROOT / '.tools' / 'gradle' / 'caches' / 'modules-2' / 'files-2.1'}")
+        print(f"  3. {Path(os.environ.get('USERPROFILE') or Path.home()) / '.gradle' / 'caches' / 'modules-2' / 'files-2.1'}")
+        print("請先在這台機器上成功構建過一次（或讓使用者跑一次 flutter run）。")
         return 2
+    print(f"Gradle 依賴快取 {len(GRADLE_CACHES)} 個：")
+    for c in GRADLE_CACHES:
+        print(f"  {c}")
 
     sources = sorted(KOTLIN_SRC.rglob("*.kt"))
     if not sources:

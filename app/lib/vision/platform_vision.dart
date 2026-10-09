@@ -10,6 +10,8 @@ import 'dart:ui' show Size;
 import 'package:flutter/services.dart';
 
 import '../l10n/app_strings.dart';
+import '../capture/capture_result.dart';
+import '../capture/text_read_result.dart';
 import 'detection.dart';
 import 'platform_contract.dart';
 import 'model_class_map.dart';
@@ -370,6 +372,44 @@ class PlatformVision implements VisionSource {
       <String, Object>{VisionKeys.path: target, VisionKeys.bytes: bytes},
     );
     return target;
+  }
+
+  /// Ask native to JPEG-save the latest camera frame into app-private storage.
+  Future<CaptureResult> captureFrame() async {
+    try {
+      final reply = await _method.invokeMethod<Map<Object?, Object?>>(
+        VisionMethods.captureFrame,
+      );
+      return CaptureResult.fromMap(reply);
+    } on PlatformException catch (e) {
+      return CaptureResult.fail('${e.code}: ${e.message}');
+    } on MissingPluginException {
+      return CaptureResult.fail('当前平台尚未实现视觉插件');
+    }
+  }
+
+  /// 读最近一帧相机原图上的文字（招牌、门牌、指示牌）。
+  ///
+  /// **按需调用**，不是持续模式：原生侧每次调用才建立辨识器、用完即关。
+  /// 本机 CPU 已被检测占满，持续跑 OCR 会互抢 CPU 并洗掉障碍物播报。
+  ///
+  /// 与 [captureFrame] 一样，像素不过通道——原生做完辨识只回文字与坐标。
+  ///
+  /// 这个方法**不做任何 UI 与播报**：它只是能力。把它接成「识字模式」
+  /// （含不冲突 TalkBack 的触发手势）是后续独立的一步。
+  Future<TextReadResult> readText() async {
+    try {
+      final reply = await _method.invokeMethod<Map<Object?, Object?>>(
+        VisionMethods.readText,
+      );
+      return TextReadResult.fromMap(reply);
+    } on PlatformException catch (e) {
+      return TextReadResult.fail('${e.code}: ${e.message}');
+    } on MissingPluginException {
+      // iOS 侧尚未实现（见 VisionPlugin.swift）——不抛异常，退化为「读不到」。
+      // 与 captureFrame 同一个取舍：功能缺席只该降级，不该让 App 崩。
+      return TextReadResult.fail('当前平台尚未实现视觉插件');
+    }
   }
 
   @override

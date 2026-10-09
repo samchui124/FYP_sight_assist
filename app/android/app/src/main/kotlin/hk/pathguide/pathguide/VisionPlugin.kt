@@ -1,6 +1,12 @@
 package hk.pathguide.pathguide
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.ImageFormat
+import android.graphics.Matrix
+import android.graphics.Rect
+import android.graphics.YuvImage
 import android.util.Log
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
@@ -10,6 +16,11 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
+// OCR（識字）。★ 用 `com.google.mlkit:`（綁定版）——模型包在 APK 裡，離線可用。
+// 見 build.gradle.kts 的說明：`play-services-` 那條會走 Play Services 按需下載。
+import com.google.mlkit.vision.common.InputImage
+import com.google.mlkit.vision.text.TextRecognition
+import com.google.mlkit.vision.text.chinese.ChineseTextRecognizerOptions
 import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.embedding.engine.plugins.activity.ActivityAware
 import io.flutter.embedding.engine.plugins.activity.ActivityPluginBinding
@@ -22,8 +33,13 @@ import io.flutter.plugin.common.StandardMessageCodec
 import io.flutter.plugin.platform.PlatformView
 import io.flutter.plugin.platform.PlatformViewFactory
 import org.tensorflow.lite.Interpreter
+import java.io.ByteArrayOutputStream
+import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import kotlin.math.max
@@ -145,10 +161,52 @@ class VisionPlugin(
     @Volatile var lastDetectionCount: Int = 0
         private set
 
+    /**
+     * 最近一帧相机平面的紧凑拷贝，供定时采集写成 JPEG。
+     * 不能持有 [ImageProxy]——analyze 结束后会被 close。
+     */
+    @Volatile private var lastCapture: LastCaptureFrame? = null
+
     private var cameraExecutor: ExecutorService? = null
+
+    /**
+     * OCR 專用執行緒。**刻意與 [cameraExecutor] 分開。**
+     *
+     * ## 為什麼不能共用
+     *
+     * 相機的分析執行緒是**單執行緒**，而且 `ImageAnalysis` 的背壓策略是
+     * `STRATEGY_KEEP_ONLY_LATEST`：它只投遞最新一帧，前一帧還沒處理完就直接丟掉。
+     *
+     * 如果 OCR（真機預估 200–400 ms）跑在那條執行緒上：
+     * - OCR 期間完全沒有帧被分析 → 引導畫面**明顯卡住**
+     * - 而且那條執行緒被佔用時，`analyze()` 來不及消費帧，
+     *   後續帧會被 KEEP_ONLY_LATEST 丟棄 → **測出來的 FPS 掉幅是假的**
+     *
+     * 而「OCR 期間引導掉多少 FPS」正是這個 spike 唯一要回答的問題。
+     * 用會自己製造停頓的方式去量它，等於量到自己的測量工具。
+     *
+     * 分開之後，OCR 與偵測是**兩條執行緒在搶同一顆 CPU**——
+     * 那才是真機上真正會發生的競爭，也是唯一值得量測的數字。
+     *
+     * 生命週期比相機長：OCR 是按需、可獨立於預覽存在的動作。
+     */
+    private var ocrExecutor: ExecutorService? = null
+
+    private data class LastCaptureFrame(
+        val y: ByteArray,
+        val u: ByteArray,
+        val v: ByteArray,
+        val width: Int,
+        val height: Int,
+        val chromaWidth: Int,
+        val rotationDegrees: Int,
+    )
 
     override fun onAttachedToEngine(binding: FlutterPlugin.FlutterPluginBinding) {
         val messenger: BinaryMessenger = binding.binaryMessenger
+        // OCR 執行緒在此建立、在 onDetachedFromEngine 關閉。生命週期跟引擎一致，
+        // 而不是跟相機一致——見 ocrExecutor 的說明。
+        ocrExecutor = Executors.newSingleThreadExecutor()
         methodChannel = MethodChannel(messenger, METHOD_CHANNEL).apply {
             setMethodCallHandler(::onMethodCall)
         }
@@ -176,6 +234,8 @@ class VisionPlugin(
         frameChannel = null
         eventSink = null
         stopCamera()
+        ocrExecutor?.shutdown()
+        ocrExecutor = null
         detector?.close()
         detector = null
     }
@@ -273,6 +333,14 @@ class VisionPlugin(
                     "transposed" to (detector?.isTransposed ?: false),
                 ),
             )
+            "captureFrame" -> {
+                // JPEG 编码放后台，避免卡住平台通道回调线程。
+                runOffMainThread { result.success(saveLastCaptureJpeg()) }
+            }
+
+            // OCR：讀最近一幀的招牌／門牌／指示牌文字。**按需呼叫**，不常駐。
+            "readText" -> runOffMainThread { result.success(readLastCaptureText()) }
+
             else -> result.notImplemented()
         }
     }
@@ -568,12 +636,279 @@ class VisionPlugin(
         cameraExecutor?.shutdown()
         cameraExecutor = null
         currentPreview = null
+        lastCapture = null
         // 停止后重置诊断计数，避免「上一轮运行的帧数」被误读成当前状态。
         analyzedFrames = 0
         analyzeErrors = 0
         lastAnalyzeSkip = "相机已停止"
         lastFrameFormat = ""
         lastMaxScore = 0f
+    }
+
+    /**
+     * 把 [lastCapture] 写成应用私有目录 captures/ 下的 JPEG。
+     * 坐标系按传感器旋转纠正为正立，便于后期标注。
+     */
+    private fun saveLastCaptureJpeg(): Map<String, Any?> {
+        val snap = lastCapture
+            ?: return mapOf("ok" to false, "error" to "尚無相機幀")
+        return runCatching {
+            val nv21 = yuvPlanesToNv21(
+                snap.y, snap.u, snap.v, snap.width, snap.height, snap.chromaWidth,
+            )
+            val yuv = YuvImage(nv21, ImageFormat.NV21, snap.width, snap.height, null)
+            val rawJpeg = ByteArrayOutputStream().use { out ->
+                if (!yuv.compressToJpeg(Rect(0, 0, snap.width, snap.height), 85, out)) {
+                    error("JPEG 壓縮失敗")
+                }
+                out.toByteArray()
+            }
+            val (jpeg, outW, outH) = rotateJpegIfNeeded(
+                rawJpeg, snap.width, snap.height, snap.rotationDegrees,
+            )
+            val dir = File(context.filesDir, "captures").apply { mkdirs() }
+            val name = SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US)
+                .format(Date()) + ".jpg"
+            val file = File(dir, name)
+            file.writeBytes(jpeg)
+            Log.i(TAG, "已採集 ${jpeg.size / 1024} KB -> ${file.absolutePath}")
+            mapOf(
+                "ok" to true,
+                "path" to file.absolutePath,
+                "width" to outW,
+                "height" to outH,
+                "bytes" to file.length(),
+            )
+        }.getOrElse { e ->
+            Log.e(TAG, "captureFrame 失敗", e)
+            mapOf(
+                "ok" to false,
+                "error" to "${e.javaClass.simpleName}: ${e.message}",
+            )
+        }
+    }
+
+    /**
+     * 把这个 method channel 调用丢到后台线程，回包再切回主线程。
+     *
+     * 为什么必须这样：JPEG 编码與 OCR 都是**百毫秒级**的同步工作。若在
+     * method channel 的回调线程上直接做完，那个线程正好也在处理逐帧
+     * EventChannel 的投递，会造成掉帧——看起来像「推理变慢了」，其實是
+     * 回包线程被占用。
+     *
+     * ## 用哪條執行緒，取決於工作是什麼
+     *
+     * - [ocrExecutor]：OCR 與採集。**這兩件都是數百毫秒的長工作**，
+     *   而且 OCR 要量的正是「與偵測搶 CPU」的代價，所以必須與相機分開。
+     * - [cameraExecutor]：只有在 OCR 執行緒還沒建立時（理論上不會發生）才退而求其次。
+     *
+     * ★ 兩者都不在時自建一個**臨時**執行緒，做完即關——但那是最後手段，
+     *   因為每次呼叫都建執行緒本身就是額外成本。
+     *
+     * ★ 注意：**不要**把這裡改成直接 `executor.execute` 而不保留 finally。
+     *   工作若拋出例外，`result` 就永遠不回包，Dart 側的 `await` 會**永久懸住**
+     *   （不是拋錯、不是逾時，就是永遠等不到）。所以 work() 內部自己 try/catch，
+     *   這裡再包一層 finally 保證執行緒回收。
+     */
+    private fun runOffMainThread(work: () -> Unit) {
+        val shared = ocrExecutor ?: cameraExecutor
+        val executor = shared ?: Executors.newSingleThreadExecutor()
+        executor.execute {
+            try {
+                work()
+            } finally {
+                if (shared == null) {
+                    executor.shutdown()
+                }
+            }
+        }
+    }
+
+    /**
+     * OCR：讀 [lastCapture] 那一幀上面的文字（招牌、門牌、指示牌）。
+     *
+     * ## 設計約束（來自 docs/superpowers/specs/2026-10-09-positioning-and-ocr-evaluation.md）
+     *
+     * - **按需啟動，不常駐**：辨識器每次呼叫才建立、用完就關。本機
+     *   （SD685，無 NNAPI/GPU delegate）跑單一 int8 模型已經是 5.2 fps、
+     *   約 187 ms/次，CPU 基本滿載；常駐第二個辨識器會互搶 CPU。
+     * - **只讀既有的那幀副本**，不另做一次 `ImageAnalysis.Analyzer` 取幀。
+     *   多一個 analyzer 會與偵測搶影格，而 CameraX 的背壓策略是
+     *   KEEP_ONLY_LATEST，搶影格等於直接降低偵測幀率。
+     *
+     * ## 為什麼走 JPEG 繞一圈
+     *
+     * 純 CPU 也能把 YUV 直接轉 ARGB，但那是一段**容易寫錯又不報錯**的色彩轉換
+     * 數學（色度取樣位置、奇偶行、行列步長），錯了只會讓 OCR 準確率默默變差。
+     * 這裡改用 repo 裡**既有的、已在真機驗證過**的 YUV→JPEG→Bitmap 路徑
+     * （[yuvPlanesToNv21] + [rotateJpegIfNeeded]，與採集同一套）。代價是多一次
+     * 編解碼，所以把各段耗時一併回報，讓瓶頸看得見而不是猜。
+     *
+     * ## 回包
+     *
+     * `{ok, text, elements: [{text, bounds, cornerPoints, confidence}],
+     *   decodeMs, ocrMs, totalMs, width, height}`；失敗時 `{ok: false, error}`。
+     *
+     * 回包**不含像素**：座標是相對於回報的 width/height，Dart 側要畫框再自己映射。
+     */
+    private fun readLastCaptureText(): Map<String, Any?> {
+        val snap = lastCapture
+            ?: return mapOf("ok" to false, "error" to "尚無相機幀")
+
+        val totalStart = System.nanoTime()
+        var decodeMs = 0.0
+        var bitmap: Bitmap? = null
+        var recognizer: com.google.mlkit.vision.text.TextRecognizer? = null
+
+        try {
+            // ---- 1. 既有 YUV 副本 -> 正立 Bitmap ----
+            val decodeStart = System.nanoTime()
+            val nv21 = yuvPlanesToNv21(
+                snap.y, snap.u, snap.v, snap.width, snap.height, snap.chromaWidth,
+            )
+            val yuv = YuvImage(nv21, ImageFormat.NV21, snap.width, snap.height, null)
+            val rawJpeg = ByteArrayOutputStream().use { out ->
+                if (!yuv.compressToJpeg(Rect(0, 0, snap.width, snap.height), 85, out)) {
+                    error("JPEG 壓縮失敗")
+                }
+                out.toByteArray()
+            }
+            // rotateJpegIfNeeded 對 0 度會原樣回傳，所以這裡一律再解碼一次，
+            // 免得 0 度與 90 度走兩條不同的路徑（那就多一條沒被驗證過的分支）。
+            val (jpeg, outW, outH) = rotateJpegIfNeeded(
+                rawJpeg, snap.width, snap.height, snap.rotationDegrees,
+            )
+            val bmp = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size)
+                ?: error("JPEG 解碼為 Bitmap 失敗（${jpeg.size} bytes）")
+            bitmap = bmp
+            decodeMs = (System.nanoTime() - decodeStart) / 1_000_000.0
+
+            val image = InputImage.fromBitmap(bmp, 0)
+
+            // ---- 2. 用 CountDownLatch 把 ML Kit 的非同步 Task 接回同步流程 ----
+            // 必須等一下，因為回包要在這個 method channel 呼叫裡送回。
+            // 10 秒只是**保險絲**：真機上 OCR 是百毫秒級，若真的撞到 10 秒，
+            // 那本身就是必須讓使用者看見的結果（比無限期卡住好）。
+            val latch = java.util.concurrent.CountDownLatch(1)
+            var text: com.google.mlkit.vision.text.Text? = null
+            var failure: Exception? = null
+
+            val client = TextRecognition.getClient(ChineseTextRecognizerOptions.Builder().build())
+            recognizer = client
+            val ocrStart = System.nanoTime()
+            client.process(image)
+                .addOnSuccessListener { text = it }
+                .addOnFailureListener { failure = it as? Exception ?: Exception(it) }
+                .addOnCompleteListener { latch.countDown() }
+
+            if (!latch.await(10, java.util.concurrent.TimeUnit.SECONDS)) {
+                return mapOf("ok" to false, "error" to "OCR 逾時（>10s）", "decodeMs" to decodeMs)
+            }
+            val ocrMs = (System.nanoTime() - ocrStart) / 1_000_000.0
+            failure?.let { throw it }
+
+            val recognized = text
+                ?: return mapOf("ok" to false, "error" to "OCR 無回包", "decodeMs" to decodeMs)
+
+            // ---- 3. 只搬葉節點欄位，不搬 ML Kit 的活物件 ----
+            val elements = recognized.textBlocks.flatMap { block ->
+                block.lines.flatMap { line -> line.elements }
+            }.map { el ->
+                mapOf(
+                    "text" to el.text,
+                    // 像素座標，原點在**正立之後**的左上角，與回報的 width/height 同一座標系。
+                    "bounds" to mapOf(
+                        "left" to el.boundingBox?.left,
+                        "top" to el.boundingBox?.top,
+                        "right" to el.boundingBox?.right,
+                        "bottom" to el.boundingBox?.bottom,
+                    ),
+                    "cornerPoints" to el.cornerPoints?.map { listOf(it.x, it.y) },
+                    // ML Kit 的 `confidence` 只在辨識器 options 開啟時才有效，
+                    // 所以型別與數值都可能變；一律轉成 Double 過通道，Dart 側防禦式解析。
+                    "confidence" to el.confidence.toDouble(),
+                )
+            }
+
+            val totalMs = (System.nanoTime() - totalStart) / 1_000_000.0
+            Log.i(
+                TAG,
+                "OCR：${elements.size} 個元素 / ${recognized.text.length} 字，" +
+                    "解碼 ${"%.0f".format(decodeMs)} ms，辨識 ${"%.0f".format(ocrMs)} ms，" +
+                    "合計 ${"%.0f".format(totalMs)} ms（$outW x $outH）",
+            )
+
+            return mapOf(
+                "ok" to true,
+                "text" to recognized.text,
+                "elements" to elements,
+                "decodeMs" to decodeMs,
+                "ocrMs" to ocrMs,
+                "totalMs" to totalMs,
+                "width" to outW,
+                "height" to outH,
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "readText 失敗", e)
+            return mapOf(
+                "ok" to false,
+                "error" to "${e.javaClass.simpleName}: ${e.message}",
+                "decodeMs" to decodeMs,
+            )
+        } finally {
+            // 兩個都是原生資源，且是**每次呼叫新建**的，所以一定要關——
+            // 這個 spike 會被反覆呼叫，漏關就是穩定的記憶體成長。
+            runCatching { recognizer?.close() }
+                .onFailure { Log.w(TAG, "關閉 OCR 辨識器失敗", it) }
+            runCatching { bitmap?.recycle() }
+                .onFailure { Log.w(TAG, "回收 OCR bitmap 失敗", it) }
+        }
+    }
+
+    /** 紧凑 Y/U/V 平面 → NV21（Y + 交错 V/U）。 */
+    private fun yuvPlanesToNv21(
+        y: ByteArray,
+        u: ByteArray,
+        v: ByteArray,
+        width: Int,
+        height: Int,
+        chromaWidth: Int,
+    ): ByteArray {
+        val frameSize = width * height
+        val nv21 = ByteArray(frameSize + frameSize / 2)
+        System.arraycopy(y, 0, nv21, 0, min(y.size, frameSize))
+        val chromaHeight = height / 2
+        var dst = frameSize
+        for (row in 0 until chromaHeight) {
+            val rowBase = row * chromaWidth
+            for (col in 0 until chromaWidth) {
+                val i = rowBase + col
+                nv21[dst++] = if (i < v.size) v[i] else 0
+                nv21[dst++] = if (i < u.size) u[i] else 0
+            }
+        }
+        return nv21
+    }
+
+    private fun rotateJpegIfNeeded(
+        jpeg: ByteArray,
+        width: Int,
+        height: Int,
+        rotationDegrees: Int,
+    ): Triple<ByteArray, Int, Int> {
+        val deg = ((rotationDegrees % 360) + 360) % 360
+        if (deg == 0) return Triple(jpeg, width, height)
+        val src = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size)
+            ?: return Triple(jpeg, width, height)
+        val matrix = Matrix().apply { postRotate(deg.toFloat()) }
+        val rotated = Bitmap.createBitmap(src, 0, 0, src.width, src.height, matrix, true)
+        if (rotated !== src) src.recycle()
+        val out = ByteArrayOutputStream()
+        rotated.compress(Bitmap.CompressFormat.JPEG, 85, out)
+        val outW = rotated.width
+        val outH = rotated.height
+        rotated.recycle()
+        return Triple(out.toByteArray(), outW, outH)
     }
 
     /** 单帧分析：YUV -> 检测 -> EventChannel。
@@ -592,7 +927,6 @@ class VisionPlugin(
             val det = detector
             if (det == null) { lastAnalyzeSkip = "模型未就绪"; return }
             if (currentPreview == null) { lastAnalyzeSkip = "预览未就绪"; return }
-            if (det.isBusy) { lastAnalyzeSkip = "上一帧仍在推理"; return }
 
             val w = image.width
             val h = image.height
@@ -620,6 +954,20 @@ class VisionPlugin(
                 vPlane.buffer, vPlane.rowStride, cw, ch, vPlane.pixelStride,
                 "V(rs=${vPlane.rowStride} ps=${vPlane.pixelStride} lim=${vPlane.buffer.limit()})",
             )
+
+            // 在 ImageProxy.close 之前留下一帧紧凑拷贝，供定时采集落盘。
+            // 即使本帧因 isBusy 跳过推理，采集仍能拿到最新画面。
+            lastCapture = LastCaptureFrame(
+                y = yBytes,
+                u = uBytes,
+                v = vBytes,
+                width = w,
+                height = h,
+                chromaWidth = cw,
+                rotationDegrees = rotation,
+            )
+
+            if (det.isBusy) { lastAnalyzeSkip = "上一帧仍在推理"; return }
 
             val t0 = System.nanoTime()
             val detections = det.detectYuv(

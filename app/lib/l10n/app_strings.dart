@@ -95,6 +95,16 @@ class AppStrings {
 
   String get showLabels => _zh ? '顯示標籤' : 'Show labels';
 
+  String get startCapture => _zh ? '開始採集' : 'Start capture';
+
+  String get stopCapture => _zh ? '停止採集' : 'Stop capture';
+
+  String captureSavedCount(int count) =>
+      _zh ? '已採集 $count 張' : 'Saved $count frames';
+
+  String get captureNeedsCamera =>
+      _zh ? '請先啟動相機再採集' : 'Start the camera before capturing';
+
   String get invalidDetections => _zh ? '無效' : 'Invalid';
 
   String get input => _zh ? '輸入' : 'Input';

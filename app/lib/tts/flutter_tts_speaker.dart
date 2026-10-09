@@ -43,6 +43,18 @@ class FlutterTtsSpeaker implements Speaker {
     if (defaultTargetPlatform == TargetPlatform.android) {
       await _tts.setQueueMode(0);
     }
+    // ★ 讓 `speak()` 等到**整句唸完**才完成。
+    //
+    // 沒有這一行時，`flutter_tts` 的 `speak()` 在音訊**排入佇列後立刻**就 resolve，
+    // 於是 `Announcer._speaking` 立刻變回 false——**那個旗標完全反映不了實際
+    // 有沒有在出聲**。後果有兩個，而且都很糟：
+    //
+    // 1. `canSpeakText()` 的「正在說話就別插嘴」判斷永遠不成立 → 識字會插進
+    //    障礙物播報中間，把「前面有樓梯」切斷；
+    // 2. 整個系統失去「現在在講話」的概念，所有讓位／打斷決策都建立在錯的前提上。
+    //
+    // 這是 `_speaking` 唯一能變成可信的辦法（`flutter_tts` 沒有回報播放狀態的介面）。
+    await _tts.awaitSpeakCompletion(true);
     if (defaultTargetPlatform == TargetPlatform.iOS) {
       await _tts.setSharedInstance(true);
       await _tts.setIosAudioCategory(
@@ -170,11 +182,39 @@ class FlutterTtsSpeaker implements Speaker {
     return aLang == wLang && wLang.length >= 2;
   }
 
+  /// 最後一次發聲失敗的原因；null 表示沒有失敗過。
+  ///
+  /// 為什麼要對外露出：`speak()` 的失敗原本是**完全靜默**的（直接 `return`），
+  /// 使用者聽到的是「什麼都沒有」，而我們在日誌裡也找不到任何痕跡。
+  /// 這在真機上無法區分「沒觸發」與「觸發了但沒聲音」——正是本專案反覆吃虧的
+  /// 那類「靜默失敗」。
+  String? get lastSpeechError => _lastError;
+  String? _lastError;
+
   @override
   Future<void> speak(String text) async {
+    if (text.trim().isEmpty) return;
+
+    // 初始化失敗過就再試一次：首次啟動時 TTS 引擎可能還沒就緒，
+    // 而 `_ready` 一旦為 true 就再也不會重新初始化，於是整個 session 都啞掉。
     if (!_ready) await initialize();
-    if (_resolved == null) return;
-    await _tts.speak(text);
+
+    if (_resolved == null) {
+      _lastError ??= 'TTS 沒有可用語音（initialize 未挑到語言包）→ 靜默無聲';
+      // ignore: avoid_print
+      print('[PathGuide][TTS] 丟棄播報（無可用語音）：'
+            '${text.length > 20 ? '${text.substring(0, 20)}…' : text}');
+      return;
+    }
+
+    try {
+      await _tts.speak(text);
+      _lastError = null;
+    } catch (e) {
+      _lastError = 'TTS 發聲失敗：$e';
+      // ignore: avoid_print
+      print('[PathGuide][TTS] $_lastError');
+    }
   }
 
   @override

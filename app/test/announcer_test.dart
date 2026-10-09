@@ -240,22 +240,58 @@ void main() {
       expect(speaker.spoken, <String>['麥當勞']);
     });
 
-    test('★ 剛播報過障礙物時不唸文字（招牌不能蓋掉「前面有樓梯」）', () async {
-      await announce(<Detection>[_det(_binP0Id)]);
-      speaker.spoken.clear();
+    test('★ 障礙物正在出聲時不唸文字（招牌不能切斷「前面有樓梯」）', () async {
+      // 這一條之所以能成立，是因為 `awaitSpeakCompletion(true)` 讓
+      // `_speaking` 真的反映「音訊還在播」——在此之前它幾乎立刻變回 false，
+      // 這個判斷等於形同虛設。
+      //
+      // 注意時序：`onFrame` 是**同步**返回的，但 `_speak` 是非同步的，
+      // 所以 `isSpeaking` 要等到下一個 microtask 才為 true。
+      // 在 `onFrame` 之後立刻斷言會看到 false——那是測試的錯，不是程式的錯。
+      final a = announcer.onFrame(<Detection>[_det(_binP0Id)]);
+      expect(a, isNotNull);
 
-      expect(announcer.canSpeakText(), isFalse);
-      expect(announcer.speakText('麥當勞'), isFalse);
-      expect(speaker.spoken, isEmpty);
-    });
+      while (announcer.isSpeaking) {
+        // 障礙物還在唸：識字必須讓位，且不該插嘴。
+        expect(announcer.canSpeakText(), isFalse,
+            reason: '障礙物出聲期間招牌不得插嘴');
+        expect(announcer.speakText('麥當勞'), isFalse);
+        await Future<void>.delayed(Duration.zero);
+      }
 
-    test('障礙物播報的冷卻窗口過後，文字就能唸', () async {
-      await announce(<Detection>[_det(_binP0Id)]);
-      speaker.spoken.clear();
-
-      clock.advance(announcer.globalCooldown + const Duration(milliseconds: 1));
+      // 障礙物唸完 → 招牌立刻有機會被唸。
       expect(announcer.canSpeakText(), isTrue);
       expect(announcer.speakText('麥當勞'), isTrue);
+      expect(speaker.spoken, <String>['垃圾桶', '麥當勞']);
+    });
+
+    test('★ 招牌不會被「剛播報過」的冷卻永久擋住（回歸測試）', () async {
+      // 這條是針對一個真實缺陷的回歸測試。
+      //
+      // 舊版的 canSpeakText 用「距上次障礙物播報 < globalCooldown(5 秒)」判斷，
+      // 而 `_onFrame` 是在**同一幀**裡先播報障礙物、緊接著處理識字，
+      // 所以那個差距**恆等於 0 秒** → 識字 100% 被丟掉。
+      // 真機上的表現就是「讀到字，但從來沒有聲音」。
+      await announce(<Detection>[_det(_binP0Id)]);
+      speaker.spoken.clear();
+
+      await announcer.lastSpeech; // 障礙物唸完
+      expect(announcer.canSpeakText(), isTrue,
+          reason: '障礙物唸完就該輪到招牌，不該再等 5 秒');
+      expect(announcer.speakText('麥當勞'), isTrue);
+    });
+
+    test('時間前進不影響「正在出聲」的判斷', () async {
+      await announcer.lastSpeech;
+      final a = announcer.onFrame(<Detection>[_det(_binP0Id)]);
+      expect(a, isNotNull);
+      while (announcer.isSpeaking) {
+        // 就算時鐘推了一大段，只要還在唸就仍然讓位。
+        clock.advance(const Duration(seconds: 30));
+        expect(announcer.canSpeakText(), isFalse);
+        await Future<void>.delayed(Duration.zero);
+      }
+      expect(announcer.canSpeakText(), isTrue);
     });
 
     test('文字有自己的冷卻，不會連續唸兩段', () async {
@@ -270,7 +306,10 @@ void main() {
       expect(announcer.speakText('出口'), isTrue);
     });
 
-    test('文字冷卻比障礙物冷卻短（主動想知道 vs 被動必須知道）', () {
+    test('識字冷卻存在且比障礙物冷卻短（主動想知道 vs 被動必須知道）', () {
+      // 讓位不再看 globalCooldown（改看「是否真的在出聲」），
+      // 但識字自己的冷卻仍然要比障礙物的短——否則招牌會太少唸到。
+      expect(announcer.textCooldown, greaterThan(Duration.zero));
       expect(announcer.textCooldown, lessThan(announcer.globalCooldown));
     });
 

@@ -361,8 +361,27 @@ class _DemoPageState extends State<DemoPage> with WidgetsBindingObserver {
       'spotIntervalMs': _spotter.currentInterval.inMilliseconds,
       'spotLastReason': _spotter.lastReason,
       'spotLastText': _spotter.lastText,
+      // ★ 以下三項是為了分開「沒讀到字」與「讀到卻沒出聲」。
+      //
+      // 沒有它們時，這兩種情況在狀態檔裡長得**一模一樣**（都只是沒聲音），
+      // 於是只能靠猜。而真機上實際發生的正是後者：OCR 讀到了字，
+      // 卻被播報讓位規則丟掉。
+      'spotLastElements': _lastReadElements,
+      'spotSpoken': _spokenCount,
+      'spotDeferred': _spotter.deferrals,
+      // 語音若整個 session 都發不出聲，這裡會有原因。
+      'ttsError': switch (_speaker) {
+        final FlutterTtsSpeaker s => s.lastSpeechError,
+        _ => null,
+      },
     }));
   }
+
+  /// 最近一次 OCR 讀到的元素數。0 表示真的沒看到字。
+  int _lastReadElements = 0;
+
+  /// 實際唸出去的招牌次數。
+  int _spokenCount = 0;
 
   /// 讀一幀的文字。機會式排程的**唯一**入口。
   Future<TextReadResult> _readTextNow() async {
@@ -372,7 +391,10 @@ class _DemoPageState extends State<DemoPage> with WidgetsBindingObserver {
       // 讓 TextSpotter 的診斷字串說得出原因，而不是沉默。
       return TextReadResult.fail('此平台或此來源不支援讀字');
     }
-    return source.readText();
+    final r = await source.readText();
+    // 記下元素數：0 表示「真的沒看到字」，>0 而最後沒出聲就是被讓位丟掉。
+    _lastReadElements = r.elements.length;
+    return r;
   }
 
   // ------------------------------------------------------------- 幀處理
@@ -423,6 +445,7 @@ class _DemoPageState extends State<DemoPage> with WidgetsBindingObserver {
       if (said) {
         // 只有真的唸出去才進重複冷卻。沒唸到就讓它下一輪再試，
         // 否則那塊招牌會永遠不再被念。
+        _spokenCount++;
         _spotter.markSpoken();
       } else {
         _spotter.defer();

@@ -341,6 +341,15 @@ class VisionPlugin(
             // OCR：讀最近一幀的招牌／門牌／指示牌文字。**按需呼叫**，不常駐。
             "readText" -> runOffMainThread { result.success(readLastCaptureText()) }
 
+            // 診斷用：對**指定圖片檔**跑 OCR，可指定長邊上限與辨識器語系。
+            //
+            // 為什麼需要它：真機上「讀到亂碼」「英文被逐字母唸」這兩件事
+            // 只有在**真實招牌**上才看得出來，而機會式排程每 1.5–12 秒才跑一次、
+            // 還受「場景未變」影響，根本沒法穩定重現。
+            // 這個入口讓同一張圖可以用不同解析度／辨識器各跑一遍做對照，
+            // 是「憑感覺調參數」與「有數字」之間的差別。
+            "ocrFile" -> runOffMainThread { result.success(ocrFileCall(call)) }
+
             else -> result.notImplemented()
         }
     }
@@ -877,6 +886,113 @@ class VisionPlugin(
                 .onFailure { Log.w(TAG, "關閉 OCR 辨識器失敗", it) }
             runCatching { bitmap?.recycle() }
                 .onFailure { Log.w(TAG, "回收 OCR bitmap 失敗", it) }
+        }
+    }
+
+    /**
+     * 建一個辨識器。
+     *
+     * ## 為什麼目前只有中文辨識器可選
+     *
+     * 真機觀察到**英文被逐字母唸出**。可能的來源有兩個，修法完全不同：
+     *  1. **圖太小**（現在是 640×480）→ 低解析度下拉丁字被切成單字元的 element，
+     *     提高取像解析度就能解；
+     *  2. **辨識器語系**→ 中文模型對拉丁字的切詞不如拉丁模型，要換
+     *     `com.google.mlkit:text-recognition`（另一個 artifact，會再增大 APK）。
+     *
+     * 先用本檔的 `ocrFile` 入口在**同一張圖**上比不同解析度，確定是哪一種。
+     * 若 (1) 就能解，就不必為了 (2) 多揹一個模型進 APK——這台手機的 APK
+     * 已經 219 MB，而每一次加模型都是實打實的體積。
+     */
+    private fun makeRecognizer(
+        script: String,
+    ): com.google.mlkit.vision.text.TextRecognizer {
+        if (script == "la") {
+            // 尚未引入拉丁模型。與其靜默 fallback（會讓對照實驗給出錯誤結論），
+            // 不如明確失敗——這正是本專案反覆強調的「不要靜默」。
+            throw IllegalArgumentException(
+                "script=la 未實作：需要先加 com.google.mlkit:text-recognition 依賴",
+            )
+        }
+        return TextRecognition.getClient(ChineseTextRecognizerOptions.Builder().build())
+    }
+
+    /**
+     * 診斷入口：對**指定圖片檔**跑 OCR，可指定長邊上限與辨識器語系。
+     *
+     * 入參 `{path, maxDim?, script?}`；回包與 `readText` 同格式，另加
+     * `sourceWidth`/`sourceHeight`/`width`/`height`，方便比較不同解析度的效果。
+     *
+     * 這不是產品路徑——產品用的是 [readLastCaptureText]（吃相機幀）。
+     * 留著它是為了「同一張圖、不同條件」的對照實驗，見
+     * `ocrFileCall` 的說明。
+     */
+    private fun ocrFileCall(call: MethodCall): Map<String, Any?> {
+        val path = call.argument<String>("path")
+            ?: return mapOf("ok" to false, "error" to "缺少 path")
+        val maxDim = call.argument<Int>("maxDim") ?: 0
+        val script = call.argument<String>("script") ?: "zh"
+
+        val file = File(path)
+        if (!file.exists()) return mapOf("ok" to false, "error" to "檔案不存在：$path")
+
+        var bitmap: Bitmap? = null
+        var scaled: Bitmap? = null
+        var recognizer: com.google.mlkit.vision.text.TextRecognizer? = null
+        val totalStart = System.nanoTime()
+        try {
+            val src = BitmapFactory.decodeFile(path)
+                ?: return mapOf("ok" to false, "error" to "解碼失敗：$path")
+            bitmap = src
+
+            val bmp = if (maxDim > 0 && max(src.width, src.height) > maxDim) {
+                val scale = maxDim.toFloat() / max(src.width, src.height)
+                val w = max(1, (src.width * scale).toInt())
+                val h = max(1, (src.height * scale).toInt())
+                Bitmap.createScaledBitmap(src, w, h, true).also { scaled = it }
+            } else {
+                src
+            }
+
+            val image = InputImage.fromBitmap(bmp, 0)
+            val latch = java.util.concurrent.CountDownLatch(1)
+            var text: com.google.mlkit.vision.text.Text? = null
+            var failure: Exception? = null
+
+            val client = makeRecognizer(script)
+            recognizer = client
+            val t0 = System.nanoTime()
+            client.process(image)
+                .addOnSuccessListener { text = it }
+                .addOnFailureListener { failure = it as? Exception ?: Exception(it) }
+                .addOnCompleteListener { latch.countDown() }
+            if (!latch.await(15, java.util.concurrent.TimeUnit.SECONDS)) {
+                return mapOf("ok" to false, "error" to "OCR 逾時")
+            }
+            failure?.let { throw it }
+            val ocrMs = (System.nanoTime() - t0) / 1_000_000.0
+            val rec = text ?: return mapOf("ok" to false, "error" to "OCR 無回包")
+
+            val elements = rec.textBlocks.flatMap { b -> b.lines.flatMap { l -> l.elements } }
+            return mapOf(
+                "ok" to true,
+                "text" to rec.text,
+                "elementTexts" to elements.map { it.text },
+                "elementCount" to elements.size,
+                "sourceWidth" to bitmap!!.width,
+                "sourceHeight" to bitmap!!.height,
+                "width" to bmp.width,
+                "height" to bmp.height,
+                "ocrMs" to ocrMs,
+                "totalMs" to (System.nanoTime() - totalStart) / 1_000_000.0,
+                "script" to script,
+            )
+        } catch (e: Exception) {
+            return mapOf("ok" to false, "error" to "${e.javaClass.simpleName}: ${e.message}")
+        } finally {
+            runCatching { recognizer?.close() }
+            runCatching { scaled?.recycle() }
+            runCatching { bitmap?.recycle() }
         }
     }
 

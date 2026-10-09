@@ -191,6 +191,18 @@ class TextSpotter {
 
     _consecutiveEmpty = 0;
 
+    // ★ 值不值得唸？碎片 + 噪聲寧可丟掉，也不要唸給使用者聽。
+    // 見 [isWorthSpeaking]——真機上出現過 "d0那Mele l)" 這種輸出。
+    if (!isWorthSpeaking(text, elementCount: result.elements.length)) {
+      _lastReason = '讀到的內容不像文字（可能太遠或太模糊），不播報';
+      return TextSpot(
+        text: '',
+        reason: _lastReason,
+        ocrMs: result.ocrMs,
+        decodeMs: result.decodeMs,
+      );
+    }
+
     // 同一段文字在冷卻內不重複回報。**不動 `_lastTextAt`**——
     // 動了就會變成「每次問都說在冷卻」，於是永遠唸不出來。
     if (text == _lastText) {
@@ -226,11 +238,34 @@ class TextSpotter {
   }
 
   /// 因為播報讓位而延後。下次不重新計時，但也不進入重複冷卻。
+  ///
+  /// ## ★ 同時要清掉退避，否則招牌會被自己的退避鎖死
+  ///
+  /// 退避（[consecutiveEmpty]）的語意是「這裡沒東西好看，別浪費 CPU」。
+  /// 但**讓位代表剛剛明明讀到了字**——只是被障礙物播報擠掉而已。
+  ///
+  /// 若不清掉，會出現一個死結：
+  ///
+  /// 1. 前幾次真的讀不到字 → 間隔退避到 12 秒
+  /// 2. 後來讀到了字，但每次都撞上讓位 → 文字被丟掉
+  /// 3. 退避沒被清掉，於是每次都要等 12 秒才重試
+  /// 4. 重試時偏好的畫面往往又沒變 → 「場景未變」再擋一次
+  ///
+  /// 結果是那塊招牌**永遠唸不出來**，而所有計數看起來都「正常」。
+  /// 真機上實際觀察到的狀態就是 `spotIntervalMs: 12000` + `場景未變`，
+  /// 而 OCR 明明一直在讀到字。
   void defer({DateTime? now}) {
     _lastDeferredAt = now ?? _clock();
+    _deferrals++;
+    // 讀到字就證明「這裡有東西好看」，退避的前提不成立。
+    _consecutiveEmpty = 0;
   }
 
   DateTime? get lastDeferredAt => _lastDeferredAt;
+
+  /// 因為讓位而丟掉文字的次數。供診斷——它是「讀到字卻沒出聲」的直接證據。
+  int get deferrals => _deferrals;
+  int _deferrals = 0;
 
   /// 清空全部狀態。停止引導、換場景時用。
   ///
@@ -246,6 +281,7 @@ class TextSpotter {
     _lastReason = '尚未嘗試';
     _consecutiveEmpty = 0;
     _attempts = 0;
+    _deferrals = 0;
     _inFlight = false;
   }
 
@@ -279,6 +315,71 @@ class TextSpotter {
   /// 於是同一塊招牌被重複唸。
   static String normalize(String raw) =>
       raw.replaceAll(RegExp(r'\s+'), ' ').trim();
+
+  /// 一個「完整詞」：**三個以上**的連續拉丁字母，或**兩個以上**的連續漢字。
+  ///
+  /// 為什麼門檻要這麼高：真機的碎片輸出是 `"d0那Mele l)"` 這種，
+  /// 裡面 `"Me"` 剛好是 2 個字母，所以「2 個字母算一個詞」的規則**擋不住它**。
+  /// 實測驗證過這一點——那是把門檻從 2 提到 3 的直接原因。
+  ///
+  /// 這個門檻不會誤殺真實招牌：真實的招牌／菜單／指示牌上，
+  /// 幾乎一定有「3 字母以上的英文詞」（`Exit`、`Toilet`、`Centre`）
+  /// 或「2 字以上的中文詞」（`出口`、`洗手間`、`麥當勞`）。
+  /// 相對地，被丟掉的是 `"A12"`、`"G2"`、`"d0"` 這類編號與碎片——
+  /// 它們本來就不該被當成「招牌寫著什麼」唸出來。
+  /// ## 這道門檻的**能力邊界**（誠實說明）
+  ///
+  /// 它擋得掉：純噪聲、純數字、單一字母、以及「中文被切碎」的情況
+  /// （`"1樓 1/F"` 這種只要漢字不足兩字就會被丟）。
+  ///
+  /// 它**擋不掉**：`"d0那Mele l)"` 裡剛好有一段 3 字母以上的拉丁字
+  /// （`"Mele"`）。任何純字串啟發式都擋不掉這種——它跟真實單字長得一樣，
+  /// 只有字典或語言模型才能分辨，而引入那兩者會帶來新的一批誤判，
+  /// 而且讓行為難以解釋。
+  ///
+  /// 所以**根治要靠取像品質**（解析度／對焦／晃動），
+  /// 這道門檻只是最後一道安全網，不是解法。
+  static final RegExp _wordish =
+      RegExp(r'[A-Za-z]{3,}|[\u3400-\u4DBF\u4E00-\u9FFF]{2,}');
+
+  /// 疑似 OCR 噪聲的字元。
+  ///
+  /// 不含 `-`、`&`、`/`、`'`、`.`、`(`、`)`——那些在真實招牌上很常見
+  /// （`7-Eleven`、`A & B`、`1/F`、`McDonald's`），誤判它們會把正常招牌丟掉。
+  static final RegExp _noise = RegExp(r'[|_~^`\\<>{}\[\]@#$%*=+;]');
+
+  /// 這段文字值不值得唸？
+  ///
+  /// ## 為什麼一定要有這道門檻
+  ///
+  /// 真機上出現過 `"d0那Mele l)"`、`"ONTO)y(n)"` 這種輸出——**碎片加噪聲**。
+  /// 對全盲使用者，「招牌寫著 d0那Mele l)」比**什麼都不說**更糟：
+  /// 他會以為自己聽錯，或更糟，照著不存在的資訊行動。
+  /// **寧可安靜，也不要唸垃圾。**
+  ///
+  /// ## 判準
+  ///
+  /// 1. **至少要有一個完整詞**：3+ 連續拉丁字母，或 2+ 連續漢字。
+  /// 2. 疑似噪聲字元佔比 > 35% 直接丟。
+  ///
+  /// 兩條都刻意簡單：真實招牌的詞遠比碎片長，所以長度就是最好的分界線，
+  /// 不需要靠「英文字典」或語言模型——那些會引入誤判，而且會讓行為難以解釋。
+  ///
+  /// **不靠整句長度判斷**：菜單上一道菜名可能很短（`"凍檸茶"`），
+  /// 砍總長度會誤殺合法的短文字。
+  static bool isWorthSpeaking(String text, {int elementCount = 0}) {
+    final t = text.trim();
+    if (t.isEmpty) return false;
+
+    // 1. 至少一個完整詞。
+    if (!_wordish.hasMatch(t)) return false;
+
+    // 2. 噪聲佔比（> 35%）。
+    final noise = _noise.allMatches(t).length;
+    if (noise * 100 > t.length * 35) return false;
+
+    return true;
+  }
 
   /// 把文字裁到可唸的長度。超過就截斷並加提示。
   ///

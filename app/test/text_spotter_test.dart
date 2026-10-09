@@ -312,19 +312,36 @@ void main() {
   ///
   /// 測資全部來自真機實測輸出，不是想像的。
   group('垃圾輸出不得播報', () {
-    test('★ 真機實際讀到的碎片（中文被切碎的那種）要丟掉', () {
-      // 全部是 2026-10-09/10 真機 logcat 裡的實際輸出。
-      //
-      // ⚠️ 注意 `"d0那Mele l)"` **不會**被擋掉：它含 `"Mele"`，
-      // 那是 3 字母以上的拉丁字，跟真實單字長得一樣。
-      // 純字串啟發式分不出這種——見 isWorthSpeaking 的「能力邊界」說明。
-      // 所以這裡不假裝它會被擋掉，而是明確記錄下來。
-      expect(TextSpotter.isWorthSpeaking('ONTO)y(n)'), isTrue,
-          reason: '含 ONTO（4 字母），任何長度規則都擋不掉');
+    test('★ 真機碎片：短字母段緊黏數字 → 丟掉', () {
+      // 2026-10-10 真機實際唸出來的東西，使用者回報「會亂說」。
+      expect(TextSpotter.isWorthSpeaking('i08eeoaia。.g'), isFalse,
+          reason: 'i + 08 + eeoaia，字母段緊黏數字');
+      expect(TextSpotter.isWorthSpeaking('d0那Mele l)'), isFalse,
+          reason: 'd + 0');
       expect(TextSpotter.isWorthSpeaking('1樓 1/F'), isFalse,
-          reason: '漢字只有「樓」一個字 → 判為切碎');
-      expect(TextSpotter.isWorthSpeaking('|洗手間'), isTrue,
-          reason: '「洗手間」是完整詞，前面的雜線不該讓整句被丟掉');
+          reason: '漢字只有一個「樓」');
+    });
+
+    test('★ 能力邊界：與真實單字同形的碎片擋不掉（誠實記錄）', () {
+      // 這一條**故意斷言 true**：不假裝擋得住。
+      // 要分辨它們需要字典／語言模型，而引入那兩者會帶來新一批誤判。
+      expect(TextSpotter.isWorthSpeaking('ONTO)y(n)'), isTrue,
+          reason: '含 ONTO，與真實單字無法區分');
+    });
+
+    test('真實招牌文字要通過', () {
+      expect(TextSpotter.isWorthSpeaking('麥當勞'), isTrue);
+      expect(TextSpotter.isWorthSpeaking('凍檸茶'), isTrue);
+      expect(TextSpotter.isWorthSpeaking('出口 EXIT'), isTrue);
+      expect(TextSpotter.isWorthSpeaking('Exit 3'), isTrue);
+      expect(TextSpotter.isWorthSpeaking("McDonald's"), isTrue);
+      expect(TextSpotter.isWorthSpeaking('洗手間 Toilet'), isTrue);
+      expect(TextSpotter.isWorthSpeaking('往彩明商場'), isTrue);
+      expect(TextSpotter.isWorthSpeaking('售票處 TICKETS'), isTrue);
+      // 7-Eleven：字母段 Eleven 有 6 個字母，不是「短字母段緊黏數字」。
+      expect(TextSpotter.isWorthSpeaking('7-Eleven'), isTrue);
+      expect(TextSpotter.isWorthSpeaking('1樓 1/F'), isFalse,
+          reason: '漢字只有「樓」一個字，判為切碎');
     });
 
     test('純噪聲 / 純數字 / 單字母 / 短編號沒有完整詞 → 丟掉', () {
@@ -367,14 +384,6 @@ void main() {
       // 「1樓 1/F」只有「樓」一個漢字，依規則判為切碎。
       // 這是規則的直接後果，不是 bug。
       expect(TextSpotter.isWorthSpeaking('1樓 1/F'), isFalse);
-    });
-
-    test('★ 能力邊界：含 3 字母以上拉丁片段的垃圾擋不掉', () {
-      // 誠實記錄，不假裝擋得住。
-      expect(TextSpotter.isWorthSpeaking('d0那Mele l)'), isTrue,
-          reason: '含 Mele，與真實單字無法區分');
-      expect(TextSpotter.isWorthSpeaking('ONTO)y(n)'), isTrue,
-          reason: '含 ONTO');
     });
 
     test('★ 整條路徑：讀到「中文被切碎」時 tick 不回報文字', () async {

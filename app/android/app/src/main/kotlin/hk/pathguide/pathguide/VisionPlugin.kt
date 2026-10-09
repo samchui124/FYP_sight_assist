@@ -8,10 +8,14 @@ import android.graphics.Matrix
 import android.graphics.Rect
 import android.graphics.YuvImage
 import android.util.Log
+import android.util.Size
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
+import androidx.camera.core.resolutionselector.AspectRatioStrategy
+import androidx.camera.core.resolutionselector.ResolutionSelector
+import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
@@ -639,9 +643,43 @@ class VisionPlugin(
         val previewUseCase = Preview.Builder().build().also {
             it.surfaceProvider = view.surfaceProvider
         }
+        // ★ 明確提高分析流解析度，因為 **OCR 吃的是這一條流的影格**。
+        //
+        // `lastCapture`（供 OCR 用）就是從 `analyze()` 裡存下來的，所以
+        // 「OCR 讀得多好」直接由**這裡**決定。不指定時 CameraX 預設給
+        // 640×480，實測 OCR 只有 480x640，於是：
+        //
+        //   - 字太小／太遠 → ML Kit 把雜訊拼成假字串
+        //     （真機實際讀到 `"i08eeoaia。.g"`、`"d0那Mele l)"`）
+        //   - 這些碎片被當成招牌唸出來，比不出聲更糟
+        //
+        // ## 為什麼不是「縮放解析度」
+        //
+        // 先前的變因量測顯示「把乾淨大圖縮到 320 vs 1280」對 OCR 幾乎沒差——
+        // 但那證明的是**縮放**不影響，不是**取像**不影響。
+        // 真正的差別在感光元件取到多少細節。這是兩件不同的事，
+        // 我先前混為一談，結論錯了。
+        //
+        // ## 成本
+        //
+        // 偵測器拿到更大的幀，逐像素前處理會變貴，所以 FPS 一定會掉。
+        // 真機實測（640×480 → 1280×720）之前是 4.86 FPS，
+        // 提高之後必須重新量，掉了多少要寫在回報裡，不能假設。
+        val analysisResolution = ResolutionSelector.Builder()
+            .setAspectRatioStrategy(
+                AspectRatioStrategy.RATIO_4_3_FALLBACK_AUTO_STRATEGY,
+            )
+            .setResolutionStrategy(
+                ResolutionStrategy(
+                    Size(1280, 960),
+                    ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER,
+                ),
+            )
+            .build()
         val executor = cameraExecutor
             ?: Executors.newSingleThreadExecutor().also { cameraExecutor = it }
         val analysis = ImageAnalysis.Builder()
+            .setResolutionSelector(analysisResolution)
             .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
             .build()
             .also { it.setAnalyzer(executor) { proxy -> analyze(proxy) } }

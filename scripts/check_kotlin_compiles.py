@@ -29,9 +29,11 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import shutil
 import subprocess
 import sys
+import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
 
@@ -191,9 +193,109 @@ def project_classpath() -> list[Path]:
     return out
 
 
+def app_namespace() -> str | None:
+    """从 build.gradle.kts 读 `namespace = "..."`。
+
+    为什么要读而不是写死：存根 `R` 必须与真实 AGP 生成的 `R` 落在**同一个包**里，
+    否则 Kotlin 里 `R.string.x` 照样解析不到，而且错误信息看不出是包名错了。
+    """
+    gradle = ANDROID_APP / "build.gradle.kts"
+    if not gradle.exists():
+        return None
+    m = re.search(r'namespace\s*=\s*"([^"]+)"', gradle.read_text(encoding="utf-8"))
+    return m.group(1) if m else None
+
+
+# Kotlin 硬关键字不能直接当标识符（资源名撞上时要加反引号）。
+_KOTLIN_KEYWORDS = {
+    "as", "break", "class", "continue", "do", "else", "false", "for", "fun", "if",
+    "in", "interface", "is", "null", "object", "package", "return", "super", "this",
+    "throw", "true", "try", "typealias", "typeof", "val", "var", "when", "while",
+}
+
+# 合法的资源名（Android 本身就是这个限制）。
+_RES_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+# values/ 目录里值得生成符号的标签。
+_VALUE_TAGS = ("string", "color", "dimen", "style", "bool", "integer", "array",
+               "string-array", "integer-array", "plurals", "attr")
+
+
+def collect_resources(res_root: Path | None = None) -> dict[str, set[str]]:
+    """扫描 res/，返回 {资源类型: {名字}}。
+
+    ★ 只需要**名字**，不需要值：存根 `R` 的作用只是让编译器知道符号存在。
+      真正的值由 AGP 在正式构建时生成。
+    """
+    found: dict[str, set[str]] = {}
+
+    def add(kind: str, name: str) -> None:
+        if _RES_NAME.match(name):
+            found.setdefault(kind, set()).add(name)
+
+    if res_root is None:
+        res_root = ANDROID_APP / "src" / "main" / "res"
+    if not res_root.is_dir():
+        return found
+
+    for d in sorted(p for p in res_root.iterdir() if p.is_dir()):
+        # 目录名形如 `values`、`values-zh-rHK`、`drawable`、`mipmap-xxhdpi`
+        kind = d.name.split("-", 1)[0]
+        if kind == "values":
+            for xml in sorted(d.glob("*.xml")):
+                try:
+                    root = ET.parse(xml).getroot()
+                except ET.ParseError:
+                    continue
+                for el in root:
+                    tag = el.tag if isinstance(el.tag, str) else ""
+                    if tag in _VALUE_TAGS:
+                        add(tag, el.get("name", ""))
+        elif kind in ("drawable", "mipmap", "layout", "xml", "menu", "anim", "raw"):
+            for f in sorted(d.iterdir()):
+                if not f.is_file():
+                    continue
+                # `ic_launcher.png` -> ic_launcher；`foo.9.png` -> foo
+                add(kind, f.name.split(".")[0])
+    return found
+
+
+def write_stub_r(namespace: str, resources: dict[str, set[str]], dest: Path) -> int:
+    """生成只含符号、不含值的 `R` 存根，返回成员总数。
+
+    为什么需要：`R` 是 AGP 从资源生成的，单独用 kotlinc 编译源码时**不存在**，
+    于是任何引用 `R.drawable.x` / `R.string.x` 的正常 Android 代码都会报
+    `unresolved reference 'R'`。那是门禁的盲点，不是代码的错。
+    """
+    lines = [
+        "// 由 scripts/check_kotlin_compiles.py 自动生成，请勿编辑。",
+        "// 只提供符号名，值一律为 0：编译检查不需要真实资源 id。",
+        f"package {namespace}",
+        "",
+        "@Suppress(\"unused\")",
+        "object R {",
+    ]
+    n = 0
+    for kind in sorted(resources):
+        members = sorted(resources[kind])
+        if not members:
+            continue
+        lines.append(f"    object {kind} {{")
+        for name in members:
+            ident = f"`{name}`" if name in _KOTLIN_KEYWORDS else name
+            lines.append(f"        const val {ident} = 0")
+            n += 1
+        lines.append("    }")
+    lines.append("}")
+    dest.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return n
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("-v", "--verbose", action="store_true")
+    ap.add_argument("--no-stub-r", action="store_true",
+                    help="不生成 R 存根（用于确认某一类错误是否由存根引起）")
     args = ap.parse_args()
 
     if not JBR.exists():
@@ -227,6 +329,33 @@ def main() -> int:
         shutil.rmtree(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    # ---- R 存根 ----
+    # 见 write_stub_r 的说明：没有它，任何引用 R 的正常 Android 代码都会误报。
+    extra_sources: list[Path] = []
+    if not args.no_stub_r:
+        ns = app_namespace()
+        if not ns:
+            print("[WARN] build.gradle.kts 里读不到 namespace，跳过 R 存根；"
+                  "引用 R 的文件可能误报 unresolved reference 'R'")
+        else:
+            resources = collect_resources()
+            stub_dir = WORK / "stub_r"
+            stub_dir.mkdir(parents=True, exist_ok=True)
+            stub = stub_dir / "R.kt"
+            n_members = write_stub_r(ns, resources, stub)
+            extra_sources.append(stub)
+            print(f"R 存根：{ns}，{len(resources)} 类资源 / {n_members} 个符号")
+            # ★ 空存根是个**假阳性陷阱**：如果 res/ 扫描失败（目录搬家、权限、
+            #   解析器跟不上），存根就没有成员，于是所有引用 R 的代码都会被报
+            #   `unresolved reference 'R'`——看起来像代码错了，其实是门禁坏了。
+            #   所以这里主动检查并说清楚。
+            if n_members == 0 or not resources:
+                refs_r = [s for s in sources if "R." in s.read_text(encoding="utf-8")]
+                if refs_r:
+                    print(f"[WARN] R 存根是空的，但有 {len(refs_r)} 个源文件引用了 R。"
+                          f"下面若有 unresolved reference 'R'，那是**本脚本扫描 res/ 失败**"
+                          f"造成的，不是代码错误。res/ 实际路径：{ANDROID_APP / 'src' / 'main' / 'res'}")
+
     cmd = [
         str(JBR),
         "-cp", ";".join(str(p) for p in cc),
@@ -235,6 +364,7 @@ def main() -> int:
         "-classpath", ";".join(str(p) for p in pc),
         "-d", str(out_dir),
         *[str(s) for s in sources],
+        *[str(s) for s in extra_sources],
     ]
     proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
                           errors="replace")

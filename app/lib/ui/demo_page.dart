@@ -6,6 +6,10 @@ import 'package:flutter/foundation.dart'
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show Clipboard, ClipboardData;
 
+import '../auth/auth_strings.dart';
+import '../auth/mock_auth_service.dart';
+import '../capture/frame_sampler.dart';
+import 'auth_page.dart';
 import '../l10n/app_strings.dart';
 import '../overlay/box_painter.dart';
 import '../tts/announcer.dart';
@@ -88,6 +92,10 @@ class _DemoPageState extends State<DemoPage> {
   VisionDiagnostics? _diagnostics;
   Timer? _diagTimer;
 
+  FrameSampler? _frameSampler;
+  bool _capturing = false;
+  int _captureCount = 0;
+
   /// 帧尺寸与旋转角都来自 [VisionSource]，不在 UI 里写常量。
   ///
   /// `frameSize` 已经是**旋转之后**的尺寸，可直接用于 `DisplayFit`。
@@ -167,6 +175,7 @@ class _DemoPageState extends State<DemoPage> {
   Future<void> _switchSource(SourceMode mode) async {
     await _sub?.cancel();
     _diagTimer?.cancel();
+    _stopCapture();
     _announcer.reset();
 
     final old = _source;
@@ -296,8 +305,105 @@ class _DemoPageState extends State<DemoPage> {
     });
   }
 
+  void _stopCapture() {
+    _frameSampler?.stop();
+    _frameSampler = null;
+    if (_capturing && mounted) {
+      setState(() => _capturing = false);
+    } else {
+      _capturing = false;
+    }
+  }
+
+  /// 開啟登入 / 帳號頁。
+  ///
+  /// ## 三個刻意的決定
+  ///
+  /// 1. **登入不是首頁，引導也不是靠它才能用。** 這一頁是從動作列「進去再出來」
+  ///    的獨立頁面，未登入時引導、播報、畫框完全不受影響。這是硬規則：
+  ///    領路通是行動輔具，忘密碼或斷網都不能把使用者丟在街上。
+  ///
+  /// 2. **用 `MockAuthService`（假貨）。** 本專案目前沒有任何後端，
+  ///    所以這裡登入**一定會成功**，帳號是假的 `mock.user@pathguide.test`。
+  ///    ⚠️ **示範時不要把它講成真的登入。** 接上真實後端時，
+  ///    只要把這一行換成真實的 `AuthService` 實作，其他都不用動。
+  ///
+  /// 3. **三個 callback 全部接上 `Navigator.pop`**，所以登入成功、按「稍後再說」、
+  ///    按「回到引導」都會回到引導畫面。沒有出口的頁面等於把使用者關起來。
+  void _openAuth() {
+    Navigator.of(context).push<void>(MaterialPageRoute<void>(
+      builder: (_) => AuthPage(
+        service: MockAuthService(),
+        speaker: _speaker,
+        onSkip: () => Navigator.of(context).pop(),
+        onSignedIn: (_) => Navigator.of(context).pop(),
+        onBackToGuidance: () => Navigator.of(context).pop(),
+      ),
+    ));
+  }
+
+  /// 用 App 自己的語音回饋一次操作。
+  ///
+  /// ★ 為什麼擷取需要這個（實測回報的 bug）：原本開始／停止擷取的唯一回饋是
+  ///   圖示變色（`camera_outlined` → `camera`、轉 `orangeAccent`）加上動作列
+  ///   下方一行 12px 小字，**全部是視覺的**。對全盲使用者來說
+  ///   「開始成功」與「被拒絕」長得一模一樣（都是沉默），所以他會回報
+  ///   「按了沒反應」——而程式其實是好的。
+  ///
+  /// ★ 遵守既有的分流規則：螢幕閱讀器開著時**不出聲**，交給它播報，
+  ///   否則兩隻聲音會疊在一起。
+  void _say(String text) {
+    if (!mounted) return;
+    if (MediaQuery.of(context).accessibleNavigation) return;
+    _speaker.speak(text).ignore();
+  }
+
+  void _toggleCapture() {
+    if (_capturing) {
+      _stopCapture();
+      _say(_s.stopCapture);
+      return;
+    }
+    final source = _source;
+    if (_mode != SourceMode.camera ||
+        !_sourceReady ||
+        source is! PlatformVision) {
+      setState(() => _status = _s.captureNeedsCamera);
+      // 被拒絕也必須出聲。這是原本最嚴重的缺口：使用者按了、被拒、
+      // 而且聽不到任何解釋，只能反覆按。
+      _say(_s.captureNeedsCamera);
+      return;
+    }
+    _frameSampler?.stop();
+    _frameSampler = FrameSampler(
+      capture: source.captureFrame,
+      onResult: (result) {
+        if (!mounted) return;
+        setState(() {
+          _captureCount = _frameSampler?.savedCount ?? _captureCount;
+          if (!result.ok && result.error != null) {
+            _status = result.error;
+          } else if (result.ok) {
+            _status = _s.captureSavedCount(_captureCount);
+          }
+        });
+        // ★ 刻意**不**在這裡播報每一張的數量：那會洗版，把真正重要的
+        //   障礙物播報蓋掉（Announcer 有自己的冷卻，經不起連續灌訊息）。
+        //   數量留在畫面文字，需要的人可以自己滑過去讀。
+        //   但**失敗必須出聲**，因為那是使用者必須知道的事。
+        if (!result.ok && result.error != null) {
+          _say(result.error!);
+        }
+      },
+    );
+    _frameSampler!.start();
+    setState(() => _capturing = true);
+    _say(_s.startCapture);
+  }
+
   @override
   void dispose() {
+    _stopCapture();
     _diagTimer?.cancel();
     _sub?.cancel();
     _source?.dispose();
@@ -771,8 +877,35 @@ class _DemoPageState extends State<DemoPage> {
                   color: Colors.white70,
                 ),
               ),
+              IconButton(
+                tooltip: _capturing ? _s.stopCapture : _s.startCapture,
+                onPressed: _toggleCapture,
+                icon: Icon(
+                  _capturing ? Icons.camera : Icons.camera_outlined,
+                  color: _capturing ? Colors.orangeAccent : Colors.white70,
+                ),
+              ),
+              // 帳號 / 登入。放在最後，與其他導覽類動作分開。
+              // tooltip 就是螢幕閱讀器會唸出的標籤，所以它必須是有意義的字，
+              // 不能是空的（空的 IconButton 對全盲使用者等於不存在）。
+              IconButton(
+                tooltip: AuthStrings.current.accountTitle,
+                onPressed: _openAuth,
+                icon: const Icon(Icons.person_outline, color: Colors.white70),
+              ),
             ],
           ),
+          if (_capturing || _captureCount > 0)
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Text(
+                _s.captureSavedCount(_captureCount),
+                style: TextStyle(
+                  color: _capturing ? Colors.orangeAccent : Colors.white54,
+                  fontSize: 12,
+                ),
+              ),
+            ),
           if (_announcer.history.isNotEmpty) _announceLog(),
         ],
       ),

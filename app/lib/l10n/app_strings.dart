@@ -253,6 +253,50 @@ class AppStrings {
   String get noCameraOnDevice => _zh
       ? '這台裝置沒有可用的相機，引導無法啟動'
       : 'No camera available on this device, so guidance cannot start';
+
+  // --- 主界面：兩個模式 ---
+  //
+  // 兩個模式是**互斥**的，因為它們會互搶 CPU 與語音（真機實測：
+  // 招牌有一半被障礙物播報讓位丟掉）。所以讓使用者明確選一個。
+
+  /// 標題。主界面是唯一需要「這個 App 叫什麼」的地方。
+  String get homeTitle => _zh ? '領路通' : 'PathGuide';
+
+  /// 模式一：障礙物引導。
+  String get modeGuidance => _zh ? '開始引導' : 'Start guidance';
+
+  /// 一句話說明這個模式在做什麼（給低視力使用者與陪護者）。
+  String get modeGuidanceHint =>
+      _zh ? '偵測前方障礙物並出聲提醒' : 'Detect obstacles ahead and announce them';
+
+  /// 模式二：讀字（招牌、菜單、指示牌……）。
+  String get modeReadText => _zh ? '讀字' : 'Read text';
+
+  String get modeReadTextHint => _zh
+      ? '讀招牌、菜單、指示牌上的文字'
+      : 'Read text on signs, menus and notices';
+
+  // --- 讀字畫面 ---
+
+  /// 進入讀字模式時的第一句話。
+  String get readTextReady => _zh
+      ? '讀字模式。對著文字，讀到就會唸出來。'
+      : 'Text mode. Point at text and it will be read out.';
+
+  String get readAgain => _zh ? '再讀一次' : 'Read again';
+
+  /// 讀字中（避免使用者以為按了沒反應）。
+  String get reading => _zh ? '正在讀取…' : 'Reading…';
+
+  /// ★ 讀不到字時**必須出聲**。
+  ///
+  /// 原本是靜默的，結果是使用者分不出「畫面裡沒字」與「功能壞了」——
+  /// 全盲使用者沒有任何視覺線索可以判斷，只能反覆對準、反覆失望。
+  String get noTextFound =>
+      _zh ? '沒有看到文字，請靠近一點或對準一點' : 'No text found — move closer or aim again';
+
+  /// 回到主界面。
+  String get backToHome => _zh ? '返回' : 'Back';
 }
 
 /// Localized display / speak name for a detection label.

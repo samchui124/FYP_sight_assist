@@ -4,7 +4,7 @@ import 'package:flutter_localizations/flutter_localizations.dart';
 
 import 'l10n/app_locale.dart';
 import 'l10n/app_strings.dart';
-import 'ui/demo_page.dart';
+import 'ui/home_page.dart';
 
 /// 領路通 · PathGuide HK —— M3 最小可见 Demo。
 ///
@@ -91,7 +91,7 @@ class _PathGuideAppState extends State<PathGuideApp>
       localeResolutionCallback: (locale, supported) {
         return AppLocale.applyResolved(locale, supported);
       },
-      home: const DemoPage(),
+      home: const HomePage(),
     );
   }
 }

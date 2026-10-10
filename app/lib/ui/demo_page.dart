@@ -1,8 +1,6 @@
 import 'dart:async';
 import 'dart:io' show Platform;
 
-import 'package:flutter/foundation.dart'
-    show TargetPlatform, defaultTargetPlatform, visibleForTesting;
 import 'package:flutter/material.dart';
 
 import '../capture/frame_sampler.dart';
@@ -16,6 +14,7 @@ import '../tts/flutter_tts_speaker.dart';
 import '../vision/detection.dart';
 import '../vision/platform_vision.dart';
 import '../vision/vision_preview.dart';
+import '../vision/vision_session.dart';
 import '../vision/vision_source.dart';
 
 /// 領路通的主畫面——**整個 App 唯一的畫面**。
@@ -47,27 +46,37 @@ import '../vision/vision_source.dart';
 /// 障礙物與招牌都經由 TTS 出去。畫面留給低視力使用者與陪護者看，
 /// 所以預覽、偵測框、標籤、狀態文字都還在——但它們是輔助，不是主要通道。
 class DemoPage extends StatefulWidget {
-  const DemoPage({super.key, this.speaker, this.sourceFactory});
+  const DemoPage({super.key, this.speaker, this.sourceFactory, this.session});
 
-  /// 語音輸出。預設是真的 TTS；測試注入假的，讓「按了要出聲」這類
-  /// 行為可以被斷言（不然就得靠真機聽）。
+  /// 語音輸出。預設是真的 TTS；測試注入假的。
+  ///
+  /// 有 [session] 時以 session 的為準（那是正式流程的路徑）。
   final Speaker? speaker;
 
-  /// 建立檢測來源。預設是 `PlatformVision`（真相機）。
-  ///
-  /// 為什麼要可注入：這張畫面**沒有相機就沒有引導狀態**，
-  /// 而 widget 測試跑在桌面上。沒有這個接縫，「引導中」那條路徑
-  /// （按鈕消失、出現結束引導、招牌讓位）就完全測不到，
-  /// 只能靠真機目視——那正是這個專案吃過虧的地方。
+  /// 建立檢測來源（測試用）。有 [session] 時以 session 的為準。
   final VisionSource Function()? sourceFactory;
+
+  /// 相機與語音的共用持有者。正式流程由 `HomePage` 注入。
+  final VisionSession? session;
 
   @override
   State<DemoPage> createState() => _DemoPageState();
 }
 
 class _DemoPageState extends State<DemoPage> with WidgetsBindingObserver {
-  late final Speaker _speaker = widget.speaker ?? FlutterTtsSpeaker();
-  late final Announcer _announcer = Announcer(speaker: _speaker);
+  /// 相機與語音的共用持有者。
+  ///
+  /// 沒注入就自己建一個——這樣「直接開這一頁」（測試、或未來深層連結）
+  /// 仍然可以運作，但正式流程由 `HomePage` 注入共用的那一個，
+  /// 讓相機在兩個模式之間**保持開啟**（重啟要 1–2 秒）。
+  late final VisionSession _session = widget.session ??
+      VisionSession(
+        speaker: widget.speaker,
+        sourceFactory: widget.sourceFactory,
+      );
+
+  late final Speaker _speaker = _session.speaker;
+  late final Announcer _announcer = _session.announcer;
 
   /// 機會式讀字。見 [TextSpotter] 的說明：只在偵測的空檔讀，
   /// 因為這台機器上「平行的第二條執行緒」救不了 CPU 滿載的問題。
@@ -169,10 +178,15 @@ class _DemoPageState extends State<DemoPage> with WidgetsBindingObserver {
     // 桌面與 Web 沒有這個原生插件；讓畫面留在「無法啟動引導」的狀態，
     // 而不是去呼叫一個不存在的通道然後噴例外。
     //
-    // 有注入來源時（測試）不受這個限制：那條路徑上根本沒有原生通道。
-    if (widget.sourceFactory == null &&
-        !Platform.isAndroid &&
-        !Platform.isIOS) {
+    // 有注入來源時（測試、或 `HomePage` 注入的共用 session）不受這個限制：
+    // 那條路徑上根本沒有原生通道，判斷平台反而會讓它拒絕啟動。
+    //
+    // 注意：不能檢查 `session.source != null` —— 那在 `ensureCamera()`
+    // 跑完之前一直是 null，於是這個守衛會把測試全部擋掉
+    // （實際發生過：`initialized` 一直是 0）。注入 session 本身就是訊號。
+    final hasInjectedSource =
+        widget.sourceFactory != null || widget.session != null;
+    if (!hasInjectedSource && !Platform.isAndroid && !Platform.isIOS) {
       if (mounted) setState(() => _status = _s.noCameraOnDevice);
       return;
     }
@@ -203,16 +217,10 @@ class _DemoPageState extends State<DemoPage> with WidgetsBindingObserver {
 
   // ------------------------------------------------------------- 來源生命週期
 
-  VisionSource _makeSource() {
-    final injected = widget.sourceFactory;
-    if (injected != null) return injected();
-    // iOS VisionPlugin 在原生侧把帧旋成竖屏（rotationDegrees=0）；
-    // Android CameraX 仍输出横屏帧，需 Dart 侧按 90° 推出正立坐标系。
-    final isIos = defaultTargetPlatform == TargetPlatform.iOS;
-    return PlatformVision(rotationDegrees: isIos ? 0 : 90);
-  }
-
-  /// 啟動引導：建立相機來源、接上流與播報。
+  /// 啟動引導：取得相機、接上流與播報。
+  ///
+  /// 相機由 [_session] 持有並**跨模式存活**——所以從讀字模式切回來時
+  /// 不必等相機重啟（真機實測 1–2 秒）。
   Future<void> _startGuidance() async {
     // **先出聲再做事。** 這一句是整個畫面最重要的回饋：
     // 使用者按了之後若安靜兩秒，他不知道是按失敗還是還在忙。
@@ -222,10 +230,24 @@ class _DemoPageState extends State<DemoPage> with WidgetsBindingObserver {
     _announcer.reset();
     _spotter.reset();
 
-    final source = _makeSource();
+    final status = await _session.ensureCamera();
+    if (!mounted) return;
+
+    if (!status.ok) {
+      setState(() {
+        _guiding = false;
+        _status = status.message;
+      });
+      // 失敗一定要出聲，否則使用者只會反覆按同一顆按鈕。
+      _say(status.message);
+      return;
+    }
+
+    final source = _session.source!;
     _source = source;
 
-    // 先接流再 initialize：否则首帧可能丢。
+    // 先接流再啟用畫面：否则首帧可能丢。
+    await _sub?.cancel();
     _sub = source.frames.listen(
       _onFrame,
       onError: (Object e) {
@@ -233,21 +255,13 @@ class _DemoPageState extends State<DemoPage> with WidgetsBindingObserver {
       },
     );
 
-    final status = await source.initialize();
-    if (!mounted) return;
-
     setState(() {
-      _guiding = status.ok;
-      _status = status.ok ? _s.guiding : status.message;
+      _guiding = true;
+      _status = _s.guiding;
     });
 
-    if (status.ok) {
-      _startStatusLog(source: source);
-      if (_speakEnabled) _say(_s.guiding);
-    } else {
-      // 失敗一定要出聲，否則使用者只會反覆按同一顆按鈕。
-      _say(status.message);
-    }
+    _startStatusLog(source: source);
+    if (_speakEnabled) _say(_s.guiding);
   }
 
   /// 停止引導：拆掉相機、停止語音、清掉畫面。
@@ -273,7 +287,6 @@ class _DemoPageState extends State<DemoPage> with WidgetsBindingObserver {
   /// `_onFrame` 的來源就沒了，而且 `_guiding` 已經變 false。
   void _stopGuidance({bool byLifecycle = false}) {
     final sub = _sub;
-    final old = _source;
     _sub = null;
     _source = null;
 
@@ -309,11 +322,14 @@ class _DemoPageState extends State<DemoPage> with WidgetsBindingObserver {
       } catch (e) {
         debugPrint('[PathGuide] 取消幀訂閱失敗（已忽略）：$e');
       }
-      try {
-        await old?.dispose();
-      } catch (e) {
-        debugPrint('[PathGuide] 釋放來源失敗（已忽略）：$e');
-      }
+      // ★ **不要 dispose 來源。**
+      //
+      // 相機由 [VisionSession] 持有、**跨模式存活**。在這裡 dispose 會把
+      // 讀字模式的相機一起弄死，而那一邊完全不知道發生了什麼——
+      // 表現是「從引導切回讀字後就再也讀不到」。
+      //
+      // 結束引導只該做兩件事：**退訂**（不再收幀）與**停語音**。
+      // 真正的釋放由 `VisionSession.releaseCamera()` 負責（離開整個 App 時）。
       try {
         await _speaker.stop();
       } catch (e) {
@@ -548,10 +564,8 @@ class _DemoPageState extends State<DemoPage> with WidgetsBindingObserver {
     _teardownCapture();
     _statusTimer?.cancel();
     _sub?.cancel();
-    _source?.dispose();
-    // 只停自己建立的喇叭。注入進來的由它的所有者負責——
-    // 在測試裡那個所有者是測試本身，它還要拿 `spoken` 做斷言。
-    if (widget.speaker == null) _speaker.stop();
+    // ★ 不 dispose 來源：相機由 [VisionSession] 持有、跨模式存活。
+    // 這裡 dispose 會讓讀字模式跟著壞掉（而它完全不知道發生什麼事）。
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }

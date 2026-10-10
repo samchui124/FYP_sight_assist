@@ -225,7 +225,7 @@ void main() {
       expect(find.textContaining('正在引導'), findsWidgets);
     });
 
-    testWidgets('結束引導會拆掉來源，並回到未啟動狀態', (tester) async {
+    testWidgets('結束引導回到未啟動狀態，但**不拆掉共用相機**', (tester) async {
       final source = _FakeSource();
       await renderAndCollectText(
         tester,
@@ -239,14 +239,21 @@ void main() {
       expect(find.text('啟動引導'), findsOneWidget);
       expect(find.text('結束引導'), findsNothing);
 
-      // 資源清理是**背景**做的（見 _stopGuidance 的說明：清理的 Future
-      // 不保證完成，所以不能讓介面等它）。給它一個 microtask 週期。
-      await tester.runAsync(() async {
-        await Future<void>.delayed(const Duration(milliseconds: 50));
-      });
-      expect(source.disposed, 1);
-      expect(find.text('啟動引導'), findsOneWidget);
-      expect(find.text('結束引導'), findsNothing);
+      // ★ 這裡斷言的是**新的契約**（分模式之後才成立）：
+      //
+      // 相機由 `VisionSession` 持有、**跨模式存活**，所以結束引導只該
+      // 退訂 + 停語音，**不該 dispose 來源**——dispose 會讓讀字模式
+      // 跟著壞掉，而那一邊完全不知道發生什麼事。
+      //
+      // （舊版這裡斷言 `disposed == 1`。那個斷言在單模式時代是對的，
+      //   分模式之後變成錯的，所以改成現在這樣。）
+      expect(source.disposed, 0);
+
+      // 而且要能再啟動：相機還在，不該重新初始化。
+      await tester.tap(find.text('啟動引導'));
+      await tester.pumpAndSettle();
+      expect(source.initialized, 1, reason: '相機還活著 → 不該重建');
+      expect(find.text('結束引導'), findsOneWidget);
     });
 
     testWidgets('★ 啟動時先出聲（按了不能沒反應）', (tester) async {

@@ -1,4 +1,4 @@
-﻿"""三段式自动预标 —— 第二段：SAM 修框 + LocateAnything 裁剪验证。
+"""三段式自动预标 —— 第二段：SAM 修框 + LocateAnything 裁剪验证。
 
 **在 .venv-vlm 环境中运行**（需要 transformers 4.57.1 + LocateAnything）。
 
@@ -37,6 +37,14 @@ for p in (REPO_ROOT / "scripts", REPO_ROOT / "scripts" / "pipeline"):
 
 from label_taxonomy import LabelTaxonomy  # noqa: E402
 from la_output import exists_for, parse  # noqa: E402
+
+import env_setup  # noqa: E402  必须在 import transformers 之前
+
+# 这一步不是可选的：LocateAnything-3B 用 trust_remote_code=True，transformers 要把
+# 远端 .py 写到 `~/.cache/huggingface/modules/`，而在受限环境里工作区外不可写，
+# 于是加载**直接 PermissionError**（表现为"模型加载不了"，与权重无关）。
+# 必须在 import transformers 之前 apply()——HF_MODULES_CACHE 是模块级常量。
+env_setup.apply()
 
 CROP_SIZE = 336          # 稍大于 224，给上下文又不过度增加 prefill
 LA_WEIGHTS = "nvidia/LocateAnything-3B"
@@ -80,7 +88,11 @@ def main() -> int:
                          "与「自动标注要有质量保证」的目的相悖，故默认关闭。"
                          "追求速度时可提高，但必须知道未验证比例。")
     ap.add_argument("--max-boxes-per-image", type=int, default=30,
-                    help="单图最多验证多少个框（防某类框爆炸导致跑飞）")
+                    help="单图最多验证多少个框（防某类框爆炸导致跑飞）。"
+                         "★ 超过上限的框**不丢弃，而是原样保留且未经验证**"
+                         "（写出时标为 vlm_verified=false）。所以这个参数会"
+                         "**静默降低验证覆盖率**——它和 --trust-above 是同一个陷阱的两种形式。"
+                         "汇总行会报未验证比例，看到它就该知道这批标签里有多少没过模型。")
     ap.add_argument("--refine", action="store_true", default=True,
                     help="对通过验证的框用 SAM 修框（默认开启）")
     ap.add_argument("--no-refine", dest="refine", action="store_false")
@@ -184,6 +196,7 @@ def main() -> int:
     # ---- 主循环 ----
     t_start = time.time()
     n_boxes = n_rejected = n_verified = n_skipped = n_accepted = 0
+    n_unverified_kept = 0   # 采纳了但**没经过 VLM**：必须报出来，否则"已验证"名不副实
     vlm_calls = 0
     dropped_rows: list[dict] = []
 
@@ -235,6 +248,8 @@ def main() -> int:
                 out_d = dict(d)
                 out_d["vlm_verdict"] = verdict
                 out_d["vlm_verified"] = id(d) in verify_ids
+                if not out_d["vlm_verified"]:
+                    n_unverified_kept += 1
 
                 if args.refine:
                     x1, y1, x2, y2 = d["bbox"]
@@ -296,6 +311,9 @@ def main() -> int:
         "boxes_skipped_low_conf": n_skipped,
         "vlm_verified": n_verified,
         "vlm_calls": vlm_calls,
+        "unverified_kept": n_unverified_kept,
+        "unverified_ratio": (round(n_unverified_kept / n_accepted, 4)
+                             if n_accepted else None),
         "elapsed_s": round(elapsed, 1),
         "sec_per_image": round(elapsed / max(len(records), 1), 2),
         "config": {"min_conf": args.min_conf, "trust_above": args.trust_above,
@@ -307,6 +325,17 @@ def main() -> int:
     print(f"\n完成 {len(records)} 张，{elapsed/60:.1f} min（{stats['sec_per_image']} s/张）")
     print(f"框：入 {n_boxes} -> 采纳 {n_accepted}，VLM 拒绝 {n_rejected}，低置信丢弃 {n_skipped}")
     print(f"VLM 调用 {vlm_calls} 次")
+    if n_accepted:
+        ratio = n_unverified_kept / n_accepted
+        # ★ 必须显式报。否则「VLM 已验证」这句话在数据上不成立：超出
+        #   --max-boxes-per-image 的框会被**原样保留**（verdict=None）。
+        #   实测 --max-boxes-per-image 8 时，采纳的框里 89% 没验证过。
+        print(f"其中**未经验证** {n_unverified_kept} 个（占采纳的 {ratio:.0%}）"
+              f"  ← 超出 --max-boxes-per-image({args.max_boxes_per_image}) "
+              f"或 conf >= --trust-above({args.trust_above})")
+        if ratio > 0.5:
+            print("  ⚠️ 超过一半的采纳框没经过 VLM。这批标签**不能**称作「VLM 已验证」，"
+                  "只能算「老师草稿 + 部分验证」。要改进就调高 --max-boxes-per-image。")
     if dropped_rows:
         print(f"低置信丢弃清单（供调 --min-conf）：{dropped_path.relative_to(REPO_ROOT)}")
     print(f"输出：{verified_path.relative_to(REPO_ROOT)}")

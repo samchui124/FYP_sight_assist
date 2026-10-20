@@ -1,8 +1,10 @@
 import AVFoundation
+import CoreImage
 import CoreVideo
 import Flutter
 import TensorFlowLite
 import UIKit
+import VideoToolbox
 
 private enum VisionContract {
   static let methodChannel = "hk.pathguide/vision"
@@ -258,7 +260,7 @@ final class VisionPlugin: NSObject, FlutterPlugin, FlutterStreamHandler, AVCaptu
   private var analyzedFrames = 0
   private var analyzeErrors = 0
   private var lastError = ""
-  private var lastSkip = "尚未收到任何帧"
+  private var lastSkip = "尚未收到任何幀"
   private var lastWidth = 0
   private var lastHeight = 0
   private var lastMaxScore: Float = 0
@@ -268,6 +270,8 @@ final class VisionPlugin: NSObject, FlutterPlugin, FlutterStreamHandler, AVCaptu
   private var lastFrameFormat = ""
   private var lastInvalidCount = 0
   private var loadedModelPath: String?
+  private let captureLock = NSLock()
+  private var lastPixelBuffer: CVPixelBuffer?
 
   static func register(with registrar: FlutterPluginRegistrar) {
     let plugin = VisionPlugin()
@@ -327,11 +331,19 @@ final class VisionPlugin: NSObject, FlutterPlugin, FlutterStreamHandler, AVCaptu
       captureQueue.async {
         self.detector = nil
         self.loadedModelPath = nil
-        self.resetDiagnostics(reason: "相机已停止")
+        self.captureLock.lock()
+        self.lastPixelBuffer = nil
+        self.captureLock.unlock()
+        self.resetDiagnostics(reason: "相機已停止")
         self.sessionQueue.async {
           if self.session.isRunning { self.session.stopRunning() }
         }
         DispatchQueue.main.async { result(nil) }
+      }
+    case "captureFrame":
+      captureQueue.async {
+        let reply = self.saveLastCaptureJpeg()
+        DispatchQueue.main.async { result(reply) }
       }
     case "detect":
       result(["detections": [], "inferenceMs": 0.0, "error": "iOS uses the live frame stream."])
@@ -488,10 +500,110 @@ final class VisionPlugin: NSObject, FlutterPlugin, FlutterStreamHandler, AVCaptu
     lastInvalidCount = 0
   }
 
+  /// Deep-copy the latest camera buffer for later JPEG export.
+  private func retainLastFrame(_ pixelBuffer: CVPixelBuffer) {
+    var copy: CVPixelBuffer?
+    let width = CVPixelBufferGetWidth(pixelBuffer)
+    let height = CVPixelBufferGetHeight(pixelBuffer)
+    let attrs: [CFString: Any] = [
+      kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary,
+    ]
+    let status = CVPixelBufferCreate(
+      kCFAllocatorDefault,
+      width,
+      height,
+      CVPixelBufferGetPixelFormatType(pixelBuffer),
+      attrs as CFDictionary,
+      &copy
+    )
+    guard status == kCVReturnSuccess, let dst = copy else { return }
+    CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
+    CVPixelBufferLockBaseAddress(dst, [])
+    defer {
+      CVPixelBufferUnlockBaseAddress(dst, [])
+      CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly)
+    }
+    let planeCount = CVPixelBufferGetPlaneCount(pixelBuffer)
+    if planeCount == 0 {
+      if let src = CVPixelBufferGetBaseAddress(pixelBuffer),
+         let out = CVPixelBufferGetBaseAddress(dst) {
+        memcpy(out, src, CVPixelBufferGetDataSize(pixelBuffer))
+      }
+    } else {
+      for plane in 0..<planeCount {
+        guard let src = CVPixelBufferGetBaseAddressOfPlane(pixelBuffer, plane),
+              let out = CVPixelBufferGetBaseAddressOfPlane(dst, plane) else { continue }
+        let height = CVPixelBufferGetHeightOfPlane(pixelBuffer, plane)
+        let srcStride = CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, plane)
+        let dstStride = CVPixelBufferGetBytesPerRowOfPlane(dst, plane)
+        let rowBytes = min(srcStride, dstStride)
+        for row in 0..<height {
+          memcpy(out.advanced(by: row * dstStride), src.advanced(by: row * srcStride), rowBytes)
+        }
+      }
+    }
+    captureLock.lock()
+    lastPixelBuffer = dst
+    captureLock.unlock()
+  }
+
+  private func saveLastCaptureJpeg() -> [String: Any] {
+    captureLock.lock()
+    let buffer = lastPixelBuffer
+    captureLock.unlock()
+    guard let pixelBuffer = buffer else {
+      return ["ok": false, "error": "尚無相機幀"]
+    }
+    var cgImage: CGImage?
+    let vtStatus = VTCreateCGImageFromCVPixelBuffer(pixelBuffer, options: nil, imageOut: &cgImage)
+    guard vtStatus == noErr, let image = cgImage else {
+      // Fallback via Core Image when VideoToolbox fails.
+      let ci = CIImage(cvPixelBuffer: pixelBuffer)
+      let ctx = CIContext(options: nil)
+      guard let rendered = ctx.createCGImage(ci, from: ci.extent) else {
+        return ["ok": false, "error": "無法從相機幀生成圖像"]
+      }
+      return writeJpeg(from: rendered)
+    }
+    return writeJpeg(from: image)
+  }
+
+  private func writeJpeg(from cgImage: CGImage) -> [String: Any] {
+    let uiImage = UIImage(cgImage: cgImage)
+    guard let data = uiImage.jpegData(compressionQuality: 0.85) else {
+      return ["ok": false, "error": "JPEG 壓縮失敗"]
+    }
+    let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+    let dir = docs.appendingPathComponent("captures", isDirectory: true)
+    do {
+      try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+      let formatter = DateFormatter()
+      formatter.locale = Locale(identifier: "en_US_POSIX")
+      formatter.dateFormat = "yyyyMMdd_HHmmss_SSS"
+      let name = formatter.string(from: Date()) + ".jpg"
+      let url = dir.appendingPathComponent(name)
+      try data.write(to: url, options: .atomic)
+      return [
+        "ok": true,
+        "path": url.path,
+        "width": cgImage.width,
+        "height": cgImage.height,
+        "bytes": data.count,
+      ]
+    } catch {
+      return ["ok": false, "error": error.localizedDescription]
+    }
+  }
+
   func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
     analyzedFrames += 1
-    guard let detector, let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {
-      lastSkip = "模型未就绪或相机帧为空"
+    guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {
+      lastSkip = "相機幀為空"
+      return
+    }
+    retainLastFrame(pixelBuffer)
+    guard let detector else {
+      lastSkip = "模型未就緒或相機幀為空"
       return
     }
     do {
@@ -508,7 +620,7 @@ final class VisionPlugin: NSObject, FlutterPlugin, FlutterStreamHandler, AVCaptu
       sinkLock.lock()
       let sink = eventSink
       sinkLock.unlock()
-      guard let sink else { lastSkip = "EventSink 未连接"; return }
+      guard let sink else { lastSkip = "EventSink 未連接"; return }
       let payload: [String: Any] = [
         "detections": detections.map(\.map), "inferenceMs": lastInferenceMs,
         "frameWidth": lastWidth, "frameHeight": lastHeight,

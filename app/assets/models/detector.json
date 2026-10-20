@@ -1,16 +1,31 @@
 {
   "format": 1,
-  "version": "2026-10-02.1",
+  "version": "2026-10-02.stage2",
   "file": "detector.tflite",
-  "bytes": 2871365,
-  "sha256": "38e56bdd46f90d8fcd48f615393171137bbf51aba0b070559d035751052e2e4b",
+  "bytes": 2873120,
+  "sha256": "8054e951d547dd207479bc9354ea9e458fd95f0aec1900597f721e98141fdb1b",
   "inputSize": 416,
-  "modelClassCount": 3,
+  "modelClassCount": 18,
   "modelClassIds": [
     6,
     11,
-    7
+    7,
+    18,
+    49,
+    48,
+    10,
+    26,
+    47,
+    45,
+    46,
+    12,
+    30,
+    36,
+    33,
+    31,
+    27,
+    44
   ],
   "trainedAt": "2026-10-02",
-  "map50": 0.744
+  "map50": 0.918
 }

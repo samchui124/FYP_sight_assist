@@ -1,9 +1,10 @@
+import 'dart:io' show Platform;
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'platform_contract.dart';
-import 'web_camera_api.dart' as web_camera;
 
 /// 相机预览的平台视图。
 ///
@@ -19,15 +20,15 @@ class VisionPreview extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    if (kIsWeb) return web_camera.buildWebCameraView();
-    if (defaultTargetPlatform == TargetPlatform.android) {
+    if (kIsWeb) return const ColoredBox(color: Color(0xFF101418));
+    if (Platform.isAndroid) {
       return AndroidView(
         viewType: kVisionPreviewViewType,
         creationParams: const <String, Object?>{},
         creationParamsCodec: const StandardMessageCodec(),
       );
     }
-    if (defaultTargetPlatform == TargetPlatform.iOS) {
+    if (Platform.isIOS) {
       return const UiKitView(
         viewType: kVisionPreviewViewType,
         creationParams: <String, Object?>{},

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io' show Platform;
 // Size 来自 dart:ui。分析器曾提示此导入「多余」（理由：services.dart 已提供
 // 全部用到的符号），但那依赖 flutter 内部的再导出链——我核对了
 // services.dart 与 asset_bundle.dart 的 export 列表，没有直接看到 Size。
@@ -9,6 +10,9 @@ import 'dart:ui' show Size;
 
 import 'package:flutter/services.dart';
 
+import '../l10n/app_strings.dart';
+import '../capture/capture_result.dart';
+import '../capture/text_read_result.dart';
 import 'detection.dart';
 import 'platform_contract.dart';
 import 'model_class_map.dart';
@@ -30,7 +34,7 @@ const String defaultModelAssetKey = 'assets/models/detector.tflite';
 /// 模型清单的资源 key。清单与模型**一起**下发，缺一不可。
 const String defaultModelManifestKey = 'assets/models/detector.json';
 
-/// 平台原生视觉能力（Android CameraX / iOS AVFoundation + LiteRT）。
+/// 平台原生视觉能力（Android CameraX / iOS AVFoundation + LiteRT/TFLite）。
 ///
 /// ## 它现在真正实现了 [VisionSource]
 ///
@@ -51,11 +55,20 @@ class PlatformVision implements VisionSource {
     MethodChannel? method,
     EventChannel? events,
     this.rotationDegrees = 90,
-  })  : _method = method ?? const MethodChannel(kVisionChannel),
-        _events = events ?? const EventChannel(kFrameChannel);
+    bool? supportsTextReading,
+  }) : _method = method ?? const MethodChannel(kVisionChannel),
+       _events = events ?? const EventChannel(kFrameChannel),
+       // 預設依平台推斷：目前只有 Android 的 VisionPlugin 有 readText。
+       // 做成可覆寫的參數是為了讓呼叫端（與測試）能明確表達，
+       // 而不是散在各處寫 `Platform.isAndroid`。
+       _supportsTextReading = supportsTextReading ?? Platform.isAndroid;
 
   final MethodChannel _method;
   final EventChannel _events;
+
+  /// 見 [supportsTextReading]。宣告在欄位區而不是散在方法附近，
+  /// 因為 Dart 的初始化列表只能寫給**已宣告**的欄位。
+  final bool _supportsTextReading;
 
   /// 把原始帧转正所需的顺时针角度。
   ///
@@ -70,6 +83,7 @@ class PlatformVision implements VisionSource {
   String? _loadError;
   int _inputSize = 0;
   int _modelClassCount = 0;
+
   /// 传给原生的索引映射表（空表 = 不需要映射）。initialize() 里算出来后写入。
   List<int> _classIds = const <int>[];
   double _threshold = 0.30;
@@ -94,7 +108,7 @@ class PlatformVision implements VisionSource {
   String? get error => _loadError;
 
   @override
-  String get displayName => '相机';
+  String get displayName => AppStrings.current.sourceCamera;
 
   /// **旋转之后**的帧尺寸——归一化坐标的坐标系。
   ///
@@ -150,10 +164,11 @@ class PlatformVision implements VisionSource {
     final parsed = parseModelManifest(
       await rootBundle.loadString(defaultModelManifestKey),
     );
+    final s = AppStrings.current;
     if (!parsed.ok) {
       return VisionSourceStatus(
         ok: false,
-        message: '模型清单有问题',
+        message: s.modelManifestBad,
         error: parsed.error,
       );
     }
@@ -162,20 +177,23 @@ class PlatformVision implements VisionSource {
     // 4) 加载模型。**先按「不映射」加载**，拿到模型真实的类别数，再与清单对照。
     //    先读形状再校验，才能在「模型与清单不符」时**报错**而不是安静地标错类。
     var ok = await _loadModel(const <int>[]);
-    ModelClassMapping? mapping =
-        ok ? resolveMapping(
-                modelClassCount: _modelClassCount,
-                declared: manifest.modelClassIds,
-              ) : null;
+    ModelClassMapping? mapping = ok
+        ? resolveMapping(
+            modelClassCount: _modelClassCount,
+            declared: manifest.modelClassIds,
+          )
+        : null;
     if (ok && mapping == null) {
       // 模型与清单对不上：宁可失败也不猜。
       return VisionSourceStatus(
         ok: false,
-        message: '模型与清单不符',
-        error: '模型报告 $_modelClassCount 类，而清单（${manifest.version}）声明 '
-            'modelClassCount=${manifest.modelClassCount}、'
-            'modelClassIds=${manifest.modelClassIds}。两者必须一致——'
-            '猜一个映射会把框标成别的类，而且不会报错。',
+        message: s.modelManifestMismatch,
+        error: s.modelManifestMismatchDetail(
+          modelClassCount: _modelClassCount,
+          version: manifest.version,
+          declaredCount: manifest.modelClassCount,
+          declaredIds: manifest.modelClassIds,
+        ),
       );
     }
     if (ok && mapping != null && !mapping.identity) {
@@ -186,24 +204,29 @@ class PlatformVision implements VisionSource {
     if (!ok) {
       return VisionSourceStatus(
         ok: false,
-        message: '模型未加载',
+        message: s.modelNotLoaded,
         error: _loadError,
       );
     }
     if (!started) {
       // 模型好了但相机没起来：仍是失败，但要区分原因，
       // 否则用户会以为是模型问题。
-      return const VisionSourceStatus(
+      return VisionSourceStatus(
         ok: false,
-        message: '相机未启动',
-        error: '模型已加载，但原生相机未启动：可能未授予权限，或被其他程序占用',
+        message: s.cameraNotStarted,
+        error: s.cameraNotStartedDetail,
       );
     }
+    final mappingNote = mappingFinal != null
+        ? '；${mappingFinal.describe()}'
+        : '';
     return VisionSourceStatus(
       ok: true,
-      message: '模型已加载（类别数 $_modelClassCount'
-          '，输入 $_inputSize）'
-          '${mappingFinal != null ? "；${mappingFinal.describe()}" : ""}',
+      message: s.modelLoaded(
+        classCount: _modelClassCount,
+        inputSize: _inputSize,
+        mappingNote: mappingNote,
+      ),
     );
   }
 
@@ -335,13 +358,37 @@ class PlatformVision implements VisionSource {
     }
   }
 
+  /// 應用私有可寫目錄（原生 `modelDir` 通道）。
+  ///
+  /// 為什麼需要對外開放：診斷狀態檔要寫在這裡（見 `diag/status_log.dart`）。
+  /// 不用 `path_provider`——它會拉進 `objective_c`，而本倉庫路徑含空格，
+  /// 那會讓 build hook 失敗（`pubspec.yaml` 記著這件事）。
+  ///
+  /// 回傳 null 表示原生沒給（例如通道尚未實作）；呼叫方應優雅地放棄寫檔，
+  /// **不是**讓引導失敗。
+  Future<String?> appFilesDir() async {
+    try {
+      return await _method.invokeMethod<String>(VisionMethods.modelDir);
+    } on PlatformException catch (e) {
+      // 診斷用途失敗不該往上拋：它與「能不能引導」無關。
+      // ignore: avoid_print
+      print('[PathGuide] appFilesDir 失敗：${e.code} ${e.message}');
+      return null;
+    } on MissingPluginException {
+      return null;
+    }
+  }
+
   Future<String> _materializeModelToDisk(String assetKey) async {
     final dir = await _method.invokeMethod<String>(VisionMethods.modelDir);
     if (dir == null || dir.isEmpty) {
       throw StateError('原生未返回可写的模型目录');
     }
     final data = await rootBundle.load(assetKey);
-    final bytes = data.buffer.asUint8List(data.offsetInBytes, data.lengthInBytes);
+    final bytes = data.buffer.asUint8List(
+      data.offsetInBytes,
+      data.lengthInBytes,
+    );
 
     final target = '$dir/detector.tflite';
     // 已存在且大小一致就跳过写盘：模型约 10 MB，每次启动都写没必要。
@@ -357,11 +404,60 @@ class PlatformVision implements VisionSource {
     if (existing == bytes.length) {
       return target;
     }
-    await _method.invokeMethod<void>(
-      VisionMethods.writeFile,
-      <String, Object>{VisionKeys.path: target, VisionKeys.bytes: bytes},
-    );
+    await _method.invokeMethod<void>(VisionMethods.writeFile, <String, Object>{
+      VisionKeys.path: target,
+      VisionKeys.bytes: bytes,
+    });
     return target;
+  }
+
+  /// Ask native to JPEG-save the latest camera frame into app-private storage.
+  Future<CaptureResult> captureFrame() async {
+    try {
+      final reply = await _method.invokeMethod<Map<Object?, Object?>>(
+        VisionMethods.captureFrame,
+      );
+      return CaptureResult.fromMap(reply);
+    } on PlatformException catch (e) {
+      return CaptureResult.fail('${e.code}: ${e.message}');
+    } on MissingPluginException {
+      return CaptureResult.fail('当前平台尚未实现视觉插件');
+    }
+  }
+
+  /// 本平台是否實作了「讀字」（OCR）。
+  ///
+  /// 為什麼要有這個旗標，而不是直接呼叫、失敗就算了：
+  /// **iOS 側尚未實作 `readText`**（見 `ios/Runner/VisionPlugin.swift`）。
+  /// 沒有旗標時，iPhone 上會每 1.5 秒走一次機會式排程、穿過平台通道、
+  /// 拿到一個 `MissingPluginException`——**看起來像壞掉，其實只是還沒做**，
+  /// 而且那個成本是白花的（每秒都在問一件永遠不會成功的事）。
+  ///
+  /// 值由建構子決定（預設依平台推斷），不散在各處寫 `Platform.isAndroid`。
+  bool get supportsTextReading => _supportsTextReading;
+
+  /// 读最近一帧相机原图上的文字（招牌、门牌、指示牌）。
+  ///
+  /// **按需调用**，不是持续模式：原生侧每次调用才建立辨识器、用完即关。
+  /// 本机 CPU 已被检测占满，持续跑 OCR 会互抢 CPU 并洗掉障碍物播报。
+  ///
+  /// 与 [captureFrame] 一样，像素不过通道——原生做完辨识只回文字与坐标。
+  ///
+  /// 这个方法**不做任何 UI 与播报**：它只是能力。把它接成「识字模式」
+  /// （含不冲突 TalkBack 的触发手势）是后续独立的一步。
+  Future<TextReadResult> readText() async {
+    try {
+      final reply = await _method.invokeMethod<Map<Object?, Object?>>(
+        VisionMethods.readText,
+      );
+      return TextReadResult.fromMap(reply);
+    } on PlatformException catch (e) {
+      return TextReadResult.fail('${e.code}: ${e.message}');
+    } on MissingPluginException {
+      // iOS 侧尚未实现（见 VisionPlugin.swift）——不抛异常，退化为「读不到」。
+      // 与 captureFrame 同一个取舍：功能缺席只该降级，不该让 App 崩。
+      return TextReadResult.fail('当前平台尚未实现视觉插件');
+    }
   }
 
   @override
@@ -388,6 +484,9 @@ class PlatformVision implements VisionSource {
       inferenceMs: _asDouble(raw[VisionKeys.inferenceMs]) ?? 0,
       frameWidth: w,
       frameHeight: h,
+      focalLengthVerticalPixels: _asDouble(
+        raw[VisionKeys.focalLengthVerticalPixels],
+      ),
     );
   }
 
@@ -430,4 +529,3 @@ class PlatformVision implements VisionSource {
     return out;
   }
 }
-

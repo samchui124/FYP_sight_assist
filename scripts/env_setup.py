@@ -44,6 +44,8 @@ TORCH_CACHE_DIR = REPO_ROOT / ".tmp" / "inductor"
 HF_HUB_DEFAULT = Path.home() / ".cache" / "huggingface" / "hub"
 # Grounding DINO 等在工作区内下载的模型放这里
 HF_LOCAL_HUB = REPO_ROOT / ".hf" / "hub"
+# `trust_remote_code=True` 的远端自定义代码落盘处（必须在 import transformers 前设置）
+HF_MODULES_CACHE_DIR = REPO_ROOT / ".hf" / "modules"
 TMP_DIR = REPO_ROOT / ".tmp"
 
 
@@ -156,6 +158,14 @@ def apply() -> None:
     TORCH_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     os.environ.setdefault("TORCHINDUCTOR_CACHE_DIR", str(TORCH_CACHE_DIR))
     os.environ.setdefault("TMPDIR", str(TMP_DIR))
+    # `trust_remote_code=True` 的模型（LocateAnything-3B）会把远端 .py 落盘到
+    # `~/.cache/huggingface/modules/`（工作区外，只读）→ PermissionError。
+    # 只在 transformers 被 **import 之前** 设置才有效（那是模块级常量）。
+    # ★ 用 `HF_MODULES_CACHE` 而**不是** `HF_HOME`/`HF_HUB_CACHE`：
+    #   后两者会连带改道模型缓存，把系统缓存里的 LocateAnything 权重藏起来
+    #   （见本文件 docstring 第 4 条）。
+    HF_MODULES_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    os.environ.setdefault("HF_MODULES_CACHE", str(HF_MODULES_CACHE_DIR))
     # 避免 ultralytics 用 pip 子进程自动装依赖（受限环境会失败）
     os.environ.setdefault("YOLO_AUTOINSTALL", "false")
 

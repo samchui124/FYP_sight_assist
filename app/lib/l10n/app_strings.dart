@@ -1,0 +1,363 @@
+import 'app_locale.dart';
+import '../vision/labels.dart';
+
+/// All user-visible UI copy.
+///
+/// Two packs only: English (default / fallback) and Hong Kong Traditional
+/// Chinese. System locales `zh*` / `yue` map to the Chinese pack; everything
+/// else uses English. `supportedLocales` may list more variants so Material
+/// widgets localize — that is not a third UI pack.
+class AppStrings {
+  const AppStrings._(this.language);
+
+  final AppLanguage language;
+
+  static AppStrings of(AppLanguage language) => AppStrings._(language);
+
+  static AppStrings get current => AppStrings._(AppLocale.current);
+
+  bool get _zh => language == AppLanguage.zh;
+
+  String get appTitle => _zh ? '領路通' : 'PathGuide';
+
+  String get initializing => _zh ? '正在初始化…' : 'Initializing…';
+
+  String initializingSource(String name) =>
+      _zh ? '正在初始化（$name）…' : 'Initializing ($name)…';
+
+  String inferenceStreamError(Object e) =>
+      _zh ? '推理流出錯：$e' : 'Inference stream error: $e';
+
+  String get mockSelectCamera => _zh
+      ? '模擬畫面：選擇「相機」以開始即時識別'
+      : 'Mock view: select Camera to start live detection';
+
+  String ttsFallbackWarning(String lang) => _zh
+      ? '警告：未找到符合系統語言的語音包，目前使用 $lang'
+      : 'Warning: no matching system voice found, using $lang';
+
+  String get ttsNotReady => _zh ? '未就緒' : 'Not ready';
+
+  String get fps => 'FPS';
+
+  String get inference => _zh ? '推理' : 'Infer';
+
+  String get boxes => _zh ? '檢測框' : 'Boxes';
+
+  String get analyzedFrames => _zh ? '分析幀' : 'Analyzed';
+
+  String get analyzeErrors => _zh ? '分析錯誤' : 'Analyze errors';
+
+  String get scoreRange => _zh ? '分數' : 'Score';
+
+  String get voice => _zh ? '語音' : 'Voice';
+
+  String speakFloor(String value) => _zh
+      ? '播報門檻 ≥ $value（低分只畫框）'
+      : 'Speak floor ≥ $value (low scores draw only)';
+
+  String get frame => _zh ? '幀' : 'Frame';
+
+  String get rotation => _zh ? '旋轉' : 'Rotation';
+
+  String get scale => 'scale';
+
+  String get letterbox => _zh ? '留邊' : 'Pad';
+
+  String get uncategorized => _zh ? '（未分類）' : '(uncategorized)';
+
+  String get errorCopied => _zh ? '錯誤詳情已複製' : 'Error details copied';
+
+  String sourceInitFailed(String name) =>
+      _zh ? '$name 初始化失敗（長按複製）' : '$name failed to start (long-press to copy)';
+
+  String get sourceFallback => _zh ? '來源' : 'Source';
+
+  String get displayThreshold => _zh ? '顯示閾值' : 'Display threshold';
+
+  String get camera => _zh ? '相機' : 'Camera';
+
+  String get mock => _zh ? '模擬' : 'Mock';
+
+  String get iosDemo => _zh ? 'iOS 演示' : 'iOS demo';
+
+  String get fakeData => _zh ? '假數據' : 'Fake data';
+
+  String get muteSpeak => _zh ? '關閉播報' : 'Mute speech';
+
+  String get unmuteSpeak => _zh ? '開啟播報' : 'Enable speech';
+
+  String get speakEnabledProbe =>
+      _zh ? '語音播報已開啟' : 'Voice announcements enabled';
+
+  String get hideLabels => _zh ? '隱藏標籤' : 'Hide labels';
+
+  String get showLabels => _zh ? '顯示標籤' : 'Show labels';
+
+  String get startCapture => _zh ? '開始採集' : 'Start capture';
+
+  String get stopCapture => _zh ? '停止採集' : 'Stop capture';
+
+  String captureSavedCount(int count) =>
+      _zh ? '已採集 $count 張' : 'Saved $count frames';
+
+  String get captureNeedsCamera =>
+      _zh ? '請先啟動相機再採集' : 'Start the camera before capturing';
+
+  String get invalidDetections => _zh ? '無效' : 'Invalid';
+
+  String get input => _zh ? '輸入' : 'Input';
+
+  String get output => _zh ? '輸出' : 'Output';
+
+  String geometryMismatch(int rawW, int rawH, int frameW, int frameH) => _zh
+      ? '幾何不一致：畫框用 ${rawW}x$rawH，分析流實際 ${frameW}x$frameH → 框會整體偏移'
+      : 'Geometry mismatch: overlay ${rawW}x$rawH vs analyze ${frameW}x$frameH';
+
+  // --- Announcer decision reasons (UI log) ---
+
+  String get reasonSkipPrefix => _zh ? '跳過：' : 'skip: ';
+
+  String get reasonNormal => _zh ? '正常播報' : 'speak';
+
+  String get reasonForced => _zh ? '強制播報' : 'forced speak';
+
+  String scoreBelowFloor(String score, String floor) =>
+      _zh ? '分數 $score 低於播報門檻 $floor' : 'score $score below speak floor $floor';
+
+  String get perClassCooldown => _zh ? '同類冷卻未過' : 'per-class cooldown';
+
+  String get globalCooldown => _zh ? '全局冷卻未過' : 'global cooldown';
+
+  bool reasonIsSkip(String reason) =>
+      reason.startsWith(reasonSkipPrefix) ||
+      reason.startsWith('跳過：') ||
+      reason.startsWith('跳过：') ||
+      reason.startsWith('skip: ');
+
+  // --- Vision source names / status (must follow system language) ---
+
+  String get sourceCamera => _zh ? '相機' : 'Camera';
+
+  String get sourceMock => _zh ? '假數據' : 'Fake data';
+
+  String get sourceWebCamera => _zh ? '瀏覽器相機' : 'Browser camera';
+
+  String get mockModeReady => _zh
+      ? '假數據模式：三個按已知規律運動的框，用於校驗座標映射'
+      : 'Fake-data mode: three moving boxes for overlay checks';
+
+  String get cameraNotStarted => _zh ? '相機未啟動' : 'Camera not started';
+
+  String get cameraNotStartedDetail => _zh
+      ? '模型已載入，但原生相機未啟動：可能未授予權限，或被其他程式佔用'
+      : 'Model loaded, but the native camera did not start (permission or in use)';
+
+  String get modelManifestBad => _zh ? '模型清單有問題' : 'Model manifest invalid';
+
+  String get modelManifestMismatch =>
+      _zh ? '模型與清單不符' : 'Model/manifest mismatch';
+
+  String modelManifestMismatchDetail({
+    required int modelClassCount,
+    required String version,
+    required int declaredCount,
+    required Object declaredIds,
+  }) => _zh
+      ? '模型報告 $modelClassCount 類，而清單（$version）聲明 '
+            'modelClassCount=$declaredCount、modelClassIds=$declaredIds。'
+            '兩者必須一致——猜一個映射會把框標成別的類，而且不會報錯。'
+      : 'Model reports $modelClassCount classes, but manifest ($version) declares '
+            'modelClassCount=$declaredCount, modelClassIds=$declaredIds. '
+            'They must match — guessing a mapping mislabels boxes silently.';
+
+  String get modelNotLoaded => _zh ? '模型未載入' : 'Model not loaded';
+
+  String modelLoaded({
+    required int classCount,
+    required Object inputSize,
+    String mappingNote = '',
+  }) => _zh
+      ? '模型已載入（類別數 $classCount，輸入 $inputSize）$mappingNote'
+      : 'Model loaded ($classCount classes, input $inputSize)$mappingNote';
+
+  String get webCameraNotStarted =>
+      _zh ? '瀏覽器相機未啟動' : 'Browser camera not started';
+
+  String get webCameraReady =>
+      _zh ? '即時相機識別已啟動（TFLite）' : 'Live camera detection started (TFLite)';
+
+  String get webCameraWebOnly =>
+      _zh ? '瀏覽器相機僅支援 Web' : 'Browser camera is only available on Web';
+
+  String get webCameraPreviewNotReady =>
+      _zh ? '相機預覽尚未準備好，請重試' : 'Camera preview is not ready; try again';
+
+  String get webCameraNeedsHttps => _zh
+      ? '瀏覽器相機需要 HTTPS；請透過安全連線開啟此頁面'
+      : 'Browser camera needs HTTPS; open this page over a secure connection';
+
+  String webCameraStartFailed(Object error) =>
+      _zh ? '啟動瀏覽器相機失敗：$error' : 'Failed to start browser camera: $error';
+
+  // --- 產品畫面（單一畫面）---
+  //
+  // 這些是**使用者會聽到**的句子，所以每一條都要能只靠聽就懂。
+  // 命名原則：標籤即結果，不用「開始」「確定」這類模糊詞
+  //（見 docs/A11Y-ENTRY-AND-AUTH.md 的驗收清單）。
+
+  /// 主按鈕：相機尚未就緒時。
+  String get startGuidance => _zh ? '啟動引導' : 'Start guidance';
+
+  /// 按下「啟動引導」之後的即時回饋。**先出聲再做事**——
+  /// 這個專案把「按了之後沒反應」列為最嚴重的缺口。
+  String get starting => _zh ? '正在啟動引導' : 'Starting guidance';
+
+  /// 引導中，狀態列文字（也會被唸出來）。
+  String get guiding => _zh
+      ? '正在引導，前方有障礙物會出聲。距離只供參考，請勿單靠估算行走'
+      : 'Guiding — obstacles will be announced. Distance is approximate; do not rely on it alone.';
+
+  String distanceAnnouncement(String objectName, int meters) => _zh
+      ? '$objectName，約 $meters 米'
+      : '$objectName, approximately $meters metres away';
+
+  /// 引導已停止（回到未啟動狀態）。
+  String get guidanceStopped => _zh ? '已停止引導' : 'Guidance stopped';
+
+  /// 語音開關的標籤：label 是**動作 + 結果**，不是狀態。
+  /// 螢幕閱讀器唸的是「要按下去會發生什麼」，不是「現在是什麼」。
+  String get enableVoice => _zh ? '開啟語音' : 'Turn voice on';
+
+  String get disableVoice => _zh ? '關閉語音' : 'Turn voice off';
+
+  /// 停止引導。label 同樣是動作 + 結果。
+  String get stopGuidance => _zh ? '結束引導' : 'End guidance';
+
+  // --- 採集（把畫面留存下來，供之後的雲端標註迴路）---
+
+  /// 採集進行中（給畫面的狀態句）。
+  String get captureStarted => _zh ? '正在採集畫面' : 'Capturing frames';
+
+  /// 採集中的按鈕標籤。**必須講清楚它在留存畫面**——
+  /// 這是唯一會把使用者的畫面存下來的功能，不能只寫「停止」。
+  String get stopCaptureLabel => _zh ? '停止採集' : 'Stop capture';
+
+  /// 點下語音開關後的確認（讓使用者知道按到了）。
+  String get voiceOn => _zh ? '語音已開啟' : 'Voice on';
+
+  String get voiceOff => _zh ? '語音已關閉' : 'Voice off';
+
+  /// 讀到招牌時唸出的前置詞。**必須加**，否則使用者分不清
+  /// 「前面有樓梯」（障礙物）與「麥當勞」（招牌）——兩者都是名詞。
+  String get readSignPrefix => _zh ? '招牌寫著' : 'Sign reads';
+
+  /// 出現率很低的事實陳述，用完整句避免被聽成指令。
+  String get noCameraOnDevice => _zh
+      ? '這台裝置沒有可用的相機，引導無法啟動'
+      : 'No camera available on this device, so guidance cannot start';
+
+  // --- 主界面：兩個模式 ---
+  //
+  // 兩個模式是**互斥**的，因為它們會互搶 CPU 與語音（真機實測：
+  // 招牌有一半被障礙物播報讓位丟掉）。所以讓使用者明確選一個。
+
+  /// 標題。主界面是唯一需要「這個 App 叫什麼」的地方。
+  String get homeTitle => _zh ? '領路通' : 'PathGuide';
+
+  /// 模式一：障礙物引導。
+  String get modeGuidance => _zh ? '開始引導' : 'Start guidance';
+
+  /// 一句話說明這個模式在做什麼（給低視力使用者與陪護者）。
+  String get modeGuidanceHint =>
+      _zh ? '偵測前方障礙物並出聲提醒' : 'Detect obstacles ahead and announce them';
+
+  String get navigation => _zh ? '目的地導航' : 'Navigate to destination';
+
+  String get navigationHint => _zh
+      ? '輸入或說出目的地，在 App 內接收步行導航'
+      : 'Speak or type a destination for in-app walking directions';
+
+  String get destination => _zh ? '目的地' : 'Destination';
+
+  String get destinationHint =>
+      _zh ? '搜尋香港的地點或地址' : 'Search for a place or address in Hong Kong';
+
+  String get speakDestination => _zh ? '說出目的地' : 'Speak destination';
+
+  String get stopListening => _zh ? '停止聆聽' : 'Stop listening';
+
+  String get googlePlacesAttribution =>
+      _zh ? 'Google 地點搜尋 · Google' : 'Google Places · Google';
+
+  String get googleMapsKeyMissing =>
+      _zh ? '尚未設定 Google Maps API 金鑰' : 'Google Maps API key is not configured';
+
+  String get googlePlacesKeyMissing => _zh
+      ? '尚未設定 Google Places API 金鑰'
+      : 'Google Places API key is not configured';
+
+  String get locationPermissionDenied => _zh
+      ? '需要位置權限才能計算步行路線'
+      : 'Location permission is needed to calculate a walking route';
+
+  String get navigationPreparing =>
+      _zh ? '正在準備步行路線…' : 'Preparing your walking route…';
+
+  String get navigationLocationWaiting =>
+      _zh ? '正在取得目前位置，請稍候…' : 'Waiting for your current location…';
+
+  String get navigationNoResults =>
+      _zh ? '沒有找到地點，請試試其他名稱' : 'No places found. Try another search.';
+
+  String get navigationSearchFailed => _zh
+      ? '地點搜尋失敗，請檢查網絡與 API 設定'
+      : 'Place search failed. Check your connection and API setup.';
+
+  String get navigationRouteFailed => _zh
+      ? '無法計算步行路線，請選擇其他目的地或重試'
+      : 'Could not calculate a walking route. Choose another destination or try again.';
+
+  String get navigationSafetyNotice => _zh
+      ? '步行路線只供參考。請使用手杖、導盲犬或其他安全輔助，並留意周圍環境。'
+      : 'Walking directions are a guide only. Use your cane, guide dog, or other mobility aid and stay aware of your surroundings.';
+
+  String get noSpeechResult =>
+      _zh ? '未聽到目的地，請再試一次或輸入文字' : 'No destination heard. Try again or type it.';
+
+  /// 模式二：讀字（招牌、菜單、指示牌……）。
+  String get modeReadText => _zh ? '讀字' : 'Read text';
+
+  String get modeReadTextHint =>
+      _zh ? '讀招牌、菜單、指示牌上的文字' : 'Read text on signs, menus and notices';
+
+  // --- 讀字畫面 ---
+
+  /// 進入讀字模式時的第一句話。
+  String get readTextReady => _zh
+      ? '讀字模式。對著文字，讀到就會唸出來。'
+      : 'Text mode. Point at text and it will be read out.';
+
+  String get readAgain => _zh ? '再讀一次' : 'Read again';
+
+  /// 讀字中（避免使用者以為按了沒反應）。
+  String get reading => _zh ? '正在讀取…' : 'Reading…';
+
+  /// ★ 讀不到字時**必須出聲**。
+  ///
+  /// 原本是靜默的，結果是使用者分不出「畫面裡沒字」與「功能壞了」——
+  /// 全盲使用者沒有任何視覺線索可以判斷，只能反覆對準、反覆失望。
+  String get noTextFound =>
+      _zh ? '沒有看到文字，請靠近一點或對準一點' : 'No text found — move closer or aim again';
+
+  /// 回到主界面。
+  String get backToHome => _zh ? '返回' : 'Back';
+}
+
+/// Localized display / speak name for a detection label.
+String labelDisplayName(Label label, [AppLanguage? language]) {
+  final lang = language ?? AppLocale.current;
+  return lang == AppLanguage.zh
+      ? label.nameZh
+      : label.nameEn.replaceAll('_', ' ');
+}

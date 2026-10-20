@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-import json
 import sys
 import time
 from collections import Counter, defaultdict
@@ -33,6 +32,8 @@ for p in (REPO_ROOT / "scripts", REPO_ROOT / "scripts" / "pipeline"):
 
 from label_taxonomy import LabelTaxonomy  # noqa: E402
 
+import gdino_teacher as gd  # noqa: E402
+
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
 DEFAULT_MODEL = "IDEA-Research/grounding-dino-tiny"
 
@@ -43,24 +44,14 @@ def find_images(root: Path) -> list[Path]:
 
 
 def load_taxonomy_and_prompts() -> tuple[LabelTaxonomy, list[dict], list[str]]:
-    """返回 (taxonomy, 类别表内待查词, 表外候选词)。"""
+    """返回 (taxonomy, 类别表内待查词, 表外候选词)。
+
+    提问词与阈值都走 `gdino_teacher.queries_from_taxonomy` —— 原来是这里另抄了一份
+    一模一样的逻辑，两处一旦漂移，同一张图在 `gd_detect` 和 `stage1 --teacher gdino`
+    下会问出不同的词，而那种差异不会报错、只会让结果对不上。
+    """
     tax = LabelTaxonomy()
-    in_tax: list[dict] = []
-    for c in tax.classes:
-        if c.get("never_from_vlm"):
-            continue
-        # Grounding DINO 的 prompt 用 gdin_prompt（若有），否则用 verify_query
-        q = c.get("gdin_prompt") or c.get("verify_query")
-        if not q:
-            continue
-        in_tax.append({"class_id": c["id"], "name_en": c["name_en"],
-                       "query": str(q).lower(),
-                       "threshold": float(c.get("gdin_threshold") or 0.30)})
-    with (REPO_ROOT / "configs" / "class_aliases.json").open(encoding="utf-8") as f:
-        doc = json.load(f)
-    oot = doc["out_of_taxonomy_candidates"]
-    out_words = [w.lower() for w in oot["words"]]
-    return tax, in_tax, out_words
+    return tax, gd.queries_from_taxonomy(tax), gd.load_out_of_taxonomy_words()
 
 
 def draw(img, dets: list[dict], out_path: Path) -> None:
@@ -162,7 +153,7 @@ def main() -> int:
     oot_count: Counter[str] = Counter()
     oot_images: dict[str, set] = defaultdict(set)
     oot_samples: dict[str, str] = {}
-    mismatch: Counter[str] = Counter()      # 返回标签 != 所问 query
+    mismatch: Counter[str] = Counter()      # 返回标签可疑（非子串、无 ## 也非原句）
     ov_dir = out_dir / "overlay"
     if args.overlay:
         ov_dir.mkdir(parents=True, exist_ok=True)
@@ -173,10 +164,9 @@ def main() -> int:
         img_dets: list[dict] = []
         for query, cid, thr, name in all_queries:
             for h in infer(img, query, thr):
-                # 标签异常检测：返回的 label 与所问 query 不一致时计入（可能是 tokenizer 破损）
-                ret = h["label"].lower().strip()
-                if ret != query and ret not in (query, query.replace(" ", "")):
-                    mismatch[ret] += 1
+                # 标签异常检测：只在**可疑**时计数（子串是正常的，见 classify_label）
+                if gd.is_label_mismatch(query, h["label"]):
+                    mismatch[h["label"].lower().strip()] += 1
                 row = {"image": p.name, "query": query, "label": h["label"],
                        "conf": round(h["conf"], 4), "bbox": [round(v, 4) for v in h["bbox"]]}
                 if cid is None:
@@ -251,9 +241,10 @@ def main() -> int:
         lines.append("**未发现任何表外物件。**")
 
     if mismatch:
-        lines += ["", "## 标签异常（返回标签 != 所问 query）", "",
-                  "通常由 tokenizer 破损造成。异常标签会落入「表外」，不会被错误映射，",
-                  "但仍需关注：", ""]
+        lines += ["", "## 标签可疑（既非原句、也非其子串、且不含 `##`）", "",
+                  "GDINO 返回的本来就可能只是提问句里**被匹配到的片段**"
+                  "（`roll up banner` -> `banner`），那属正常、不计入这里。",
+                  "列在这里的是解释不通的返回，通常由 tokenizer 破损造成：", ""]
         for lab, n in mismatch.most_common(15):
             lines.append(f"- `{lab}` × {n}")
 
@@ -268,7 +259,7 @@ def main() -> int:
     if not oot_summary:
         print("    **未发现任何表外物件** —— 若预期有，说明门槛过严")
     if mismatch:
-        print(f"\n标签异常 {sum(mismatch.values())} 次（tokenizer 破损），"
+        print(f"\n标签可疑 {sum(mismatch.values())} 次（既非原句也非子串），"
               f"如 {list(mismatch)[:3]}")
     if args.overlay:
         print(f"\n叠加图（绿=表内 / 橙=表外）：{ov_dir.relative_to(REPO_ROOT)}")

@@ -264,19 +264,47 @@ def main() -> int:
     #     assert MACOS or (LINUX and not ARM64),
     #     "LiteRT export only supported on Linux x86 and macOS"
     # 与其等到导出中途才炸，不如在这里就说清楚。
+    #
+    # ★ 边界是 **8.4.83**，不是 8.4.0。
+    #
+    # 这里原本写的是 `(major, minor) > (8, 3)`，把整个 8.4.x 都挡掉了。
+    # 那是**过宽的**：实测（2026-10-09）`ultralytics==8.4.82` 在 Windows 上
+    # 以 `format='tflite'` **正常导出成功**（float32 9.2 MB，28.5 秒），
+    # 因为重定向发生在 8.4.83 才引入。
+    #
+    # 为什么这个区别很重要：YOLO26 的 `model.yaml` 用了 6 参数的 SPPF，
+    # 而 8.3.253 的 `SPPF.__init__` 只吃 3 个（`c1, c2, k`），
+    # 于是 `.train()` 与 `.export()` 都会在从 `model.yaml` 重建时抛
+    #     TypeError: SPPF.__init__() takes from 3 to 4 positional arguments but 6 were given
+    # 8.4.0 起才改成 `(c1, c2, k=5, n=3, shortcut=False)`。
+    #
+    # 所以 **8.3.253 与 >= 8.4.83 之间有一条可用的窗口**：
+    #   - 想导出 YOLO26 → 需要 >= 8.4.0（且 < 8.4.83，否则 Windows 不能导）
+    #   - 只导出既有模型 → 8.3.253 也可
+    # 原本的守卫会把前一种情况误判成「不可能」，把唯一可行的路堵死。
     uv_version = ultralytics.__version__
     try:
-        major, minor = (int(x) for x in uv_version.split(".")[:2])
+        major, minor, patch = (int(x) for x in uv_version.split(".")[:3])
     except ValueError:
-        major, minor = 0, 0
-    if (major, minor) > (8, 3):
+        major, minor, patch = 0, 0, 0
+    too_new_for_windows = (major, minor, patch) >= (8, 4, 83)
+    too_old_for_yolo26 = (major, minor) <= (8, 3)
+    if too_new_for_windows:
         print(
             f"\n!! ultralytics 版本 {uv_version} 在 Windows 上无法导出 TFLite。\n"
             f"   8.4.83 起 format='tflite' 使用新的 litert 导出器，仅支持 Linux x86 / macOS。\n"
-            f"   请在导出环境里降级：\n"
-            f"     uv pip install --python <venv>\\Scripts\\python.exe \"ultralytics==8.3.253\"\n"
+            f"   请在导出环境里改用 **< 8.4.83** 的版本：\n"
+            f"     uv pip install --python <venv>\\Scripts\\python.exe \"ultralytics==8.4.82\"\n"
+            f"     # 若只导出既有模型（非 YOLO26），8.3.253 也可以\n"
         )
         return 1
+    if too_old_for_yolo26:
+        # 这不是错误，只是提醒：8.3.x 无法导出 YOLO26（SPPF 签名不符）。
+        print(
+            f"\n[i] ultralytics {uv_version}：SPPF 签名为 (c1, c2, k)，"
+            f"无法导出 YOLO26（其 model.yaml 用 6 参数）。\n"
+            f"    导出 YOLO26 需要 >= 8.4.0 且 < 8.4.83。\n"
+        )
 
     model = YOLO(str(weights))
     outputs: dict[str, Path] = {}

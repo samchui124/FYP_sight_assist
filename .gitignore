@@ -2,6 +2,7 @@
 __pycache__/
 *.py[cod]
 .venv/
+.venv-*/
 venv/
 .pytest_cache/
 
@@ -51,7 +52,6 @@ data/probe/hk/**
 data/probe/hk_onsite/**
 data/probe/streetview/**
 data/probe/report.json
-data/discover/**/overlay/**
 !data/probe/**/.gitkeep
 !data/probe/FINDINGS.md
 !data/probe/README.md
@@ -168,4 +168,3 @@ calibration_image_sample_data_*.npy*
 # 真机验证产物（截图、logcat 转存、构建日志）。
 # 每次验证都会重新生成，体积不小，不入库；脚本 verify_on_device.ps1 会重建它。
 /artifacts/
-/gradle_log.txt

@@ -1,4 +1,5 @@
-﻿import 'package:flutter_test/flutter_test.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:pathguide/l10n/app_locale.dart';
 import 'package:pathguide/tts/announcer.dart';
 import 'package:pathguide/vision/detection.dart';
 import 'package:pathguide/vision/labels.dart';
@@ -10,6 +11,10 @@ import 'package:pathguide/vision/labels.dart';
 class _FakeSpeaker implements Speaker {
   final List<String> spoken = <String>[];
   int stops = 0;
+
+  /// 回傳 null：不觸發「語音包與系統語言不符」那條警告台詞。
+  @override
+  Future<String?> initialize() async => null;
 
   @override
   Future<void> speak(String text) async => spoken.add(text);
@@ -28,21 +33,16 @@ class _Clock {
   DateTime call() => now;
 }
 
-Detection _det(int id, {double score = 0.9}) => Detection(
-      id: id,
-      score: score,
-      cx: 0.5,
-      cy: 0.5,
-      w: 0.2,
-      h: 0.2,
-    );
+Detection _det(int id, {double score = 0.9}) =>
+    Detection(id: id, score: score, cx: 0.5, cy: 0.5, w: 0.2, h: 0.2);
 
 /// `bin`（id=7，P0）作为锚点类。
 final int _binP0Id = kLabels.firstWhere((l) => l.nameEn == 'bin').id;
 
 /// 「另一个可播报类」，用于验证跨类的全局冷却。
-final int _otherAnnouncedId =
-    kLabels.firstWhere((l) => l.announced && l.id != _binP0Id).id;
+final int _otherAnnouncedId = kLabels
+    .firstWhere((l) => l.announced && l.id != _binP0Id)
+    .id;
 
 void main() {
   late _FakeSpeaker speaker;
@@ -50,6 +50,8 @@ void main() {
   late Announcer announcer;
 
   setUp(() {
+    // Tests assert Chinese UI/TTS copy; pin the zh pack regardless of host OS.
+    AppLocale.current = AppLanguage.zh;
     speaker = _FakeSpeaker();
     clock = _Clock();
     announcer = Announcer(speaker: speaker, clock: clock.call);
@@ -75,6 +77,24 @@ void main() {
     final a = await announce(<Detection>[_det(_binP0Id)]);
     expect(a, isNotNull);
     expect(speaker.spoken, hasLength(1));
+    expect(speaker.spoken.single, kLabels[_binP0Id].nameZh);
+  });
+
+  test('校准资料可用时播报支持类别的粗略米数', () async {
+    final a = announcer.onFrame(
+      <Detection>[_det(_binP0Id)],
+      focalLengthVerticalPixels: 1000,
+      frameHeightPixels: 1000,
+    );
+    await announcer.lastSpeech;
+
+    expect(a, isNotNull);
+    expect(speaker.spoken.single, contains('約 4 米'));
+  });
+
+  test('没有相机校准资料时保留原有物件播报', () async {
+    await announce(<Detection>[_det(_binP0Id)]);
+
     expect(speaker.spoken.single, kLabels[_binP0Id].nameZh);
   });
 
@@ -140,7 +160,10 @@ void main() {
     clock.advance(const Duration(seconds: 1));
     await announce(<Detection>[_det(_binP0Id)]);
     expect(announcer.history, hasLength(2));
-    expect(announcer.history.last.reason, contains('跳过'));
+    expect(
+      announcer.history.last.reason,
+      anyOf(contains('跳過'), contains('跳过'), contains('skip')),
+    );
   });
 
   group('分数门槛：低分只画框，不开口', () {
@@ -150,16 +173,16 @@ void main() {
       expect(await announce(<Detection>[_det(_binP0Id, score: 0.35)]), isNull);
       expect(speaker.spoken, isEmpty, reason: '低分不应该发声');
       expect(announcer.history, hasLength(1), reason: '仍要留下决策记录');
-      expect(announcer.history.single.reason, contains('播报门槛'));
+      expect(announcer.history.single.reason, contains('播報門檻'));
       expect(announcer.history.single.reason, contains('0.35'));
     });
 
     test('刚好达到门槛就播报', () async {
       // 边界取 >=：门槛值本身应当算作「够格」，否则调参时会出现
       // 「设成 0.70 却永远播不出 0.70」这种说不清的行为。
-      final a = await announce(
-        <Detection>[_det(_binP0Id, score: kMinSpeakScore)],
-      );
+      final a = await announce(<Detection>[
+        _det(_binP0Id, score: kMinSpeakScore),
+      ]);
       expect(a, isNotNull);
       expect(speaker.spoken, hasLength(1));
     });
@@ -189,7 +212,10 @@ void main() {
       final strict = Announcer(speaker: speaker, minSpeakScore: 0.99);
       expect(strict.onFrame(<Detection>[_det(_binP0Id, score: 0.95)]), isNull);
       final loose = Announcer(speaker: speaker, minSpeakScore: 0.10);
-      expect(loose.onFrame(<Detection>[_det(_binP0Id, score: 0.95)]), isNotNull);
+      expect(
+        loose.onFrame(<Detection>[_det(_binP0Id, score: 0.95)]),
+        isNotNull,
+      );
     });
   });
 
@@ -212,5 +238,146 @@ void main() {
     final label = kLabels[_binP0Id];
     expect(announceTextFor(label), label.nameZh);
   });
-}
 
+  /// 識字播報（招牌文字）與障礙物播報的關係。
+  ///
+  /// ## 為什麼這一組是本專案最重要的一組測試之一
+  ///
+  /// 香港街頭的招牌是**密集**的。若讀到字就唸，結果會是使用者一直聽到店名，
+  /// 而**「前面有樓梯」被蓋掉**。對全盲使用者那是安全問題，不只是煩。
+  ///
+  /// 所以規則是不對稱的：障礙物可以打斷識字，反之**永遠不行**。
+  /// 這個不對稱在真機上很難驗證（你不可能一邊走樓梯一邊數句子），
+  /// 所以用可注入時鐘把它釘死。
+  group('識字播報讓位給障礙物', () {
+    test('乾淨狀態下可以唸文字', () {
+      expect(announcer.beginTextBatch(), isTrue);
+      expect(announcer.enqueueText('麥當勞'), isTrue);
+      expect(speaker.spoken, <String>['麥當勞']);
+    });
+
+    test('★ 障礙物正在出聲時整批讓位（招牌不能切斷「前面有樓梯」）', () async {
+      // 這一條之所以能成立，是因為 `awaitSpeakCompletion(true)` 讓
+      // `_speaking` 真的反映「音訊還在播」——在此之前它幾乎立刻變回 false，
+      // 這個判斷等於形同虛設。
+      //
+      // 注意時序：`onFrame` 是**同步**返回的，但 `_speak` 是非同步的，
+      // 所以 `isSpeaking` 要等到下一個 microtask 才為 true。
+      final a = announcer.onFrame(<Detection>[_det(_binP0Id)]);
+      expect(a, isNotNull);
+
+      while (announcer.isSpeaking) {
+        expect(announcer.beginTextBatch(), isFalse, reason: '障礙物出聲期間招牌不得插嘴');
+        expect(announcer.enqueueText('麥當勞'), isFalse);
+        await Future<void>.delayed(Duration.zero);
+      }
+
+      // 障礙物唸完 → 招牌立刻有機會被唸。
+      expect(announcer.beginTextBatch(), isTrue);
+      expect(announcer.enqueueText('麥當勞'), isTrue);
+      expect(speaker.spoken, <String>['垃圾桶', '麥當勞']);
+    });
+
+    test('★ 同一批的多句都要唸出來（真實缺陷的回歸測試）', () async {
+      // 逐句唸的時候，若每一句都走 speakText（含冷卻檢查），
+      // 第 2 句就會被自己的 3 秒冷卻擋掉，使用者只聽到第一句。
+      // 這就是 enqueueText / beginTextBatch / endTextBatch 存在的理由。
+      expect(announcer.beginTextBatch(), isTrue);
+      expect(announcer.enqueueText('招牌寫著麥當勞'), isTrue);
+      await announcer.lastSpeech;
+      expect(announcer.enqueueText('出口 EXIT'), isTrue);
+      await announcer.lastSpeech;
+      expect(announcer.enqueueText('往彩明商場'), isTrue);
+      await announcer.lastSpeech;
+      announcer.endTextBatch();
+
+      expect(speaker.spoken, <String>['招牌寫著麥當勞', '出口 EXIT', '往彩明商場']);
+
+      // 整批唸完之後才進冷卻。
+      expect(announcer.beginTextBatch(), isFalse);
+      clock.advance(announcer.textCooldown + const Duration(milliseconds: 1));
+      expect(announcer.beginTextBatch(), isTrue);
+    });
+
+    test('★ 招牌不會被「剛播報過」的冷卻永久擋住（回歸測試）', () async {
+      // 這條是針對一個真實缺陷的回歸測試。
+      //
+      // 舊版用「距上次障礙物播報 < globalCooldown(5 秒)」判斷讓位，
+      // 而 `_onFrame` 是在**同一幀**裡先播報障礙物、緊接著處理識字，
+      // 所以那個差距**恆等於 0 秒** → 識字 100% 被丟掉。
+      // 真機上的表現就是「讀到字，但從來沒有聲音」。
+      await announce(<Detection>[_det(_binP0Id)]);
+      speaker.spoken.clear();
+
+      await announcer.lastSpeech; // 障礙物唸完
+      expect(
+        announcer.beginTextBatch(),
+        isTrue,
+        reason: '障礙物唸完就該輪到招牌，不該再等 5 秒',
+      );
+      expect(announcer.enqueueText('麥當勞'), isTrue);
+    });
+
+    test('時間前進不影響「正在出聲」的判斷', () async {
+      await announcer.lastSpeech;
+      final a = announcer.onFrame(<Detection>[_det(_binP0Id)]);
+      expect(a, isNotNull);
+      while (announcer.isSpeaking) {
+        // 就算時鐘推了一大段，只要還在唸就仍然讓位。
+        clock.advance(const Duration(seconds: 30));
+        expect(announcer.beginTextBatch(), isFalse);
+        await Future<void>.delayed(Duration.zero);
+      }
+      expect(announcer.beginTextBatch(), isTrue);
+    });
+
+    test('兩批之間有冷卻，不會連續唸兩批', () async {
+      expect(announcer.beginTextBatch(), isTrue);
+      expect(announcer.enqueueText('麥當勞'), isTrue);
+      await announcer.lastSpeech;
+      announcer.endTextBatch();
+
+      expect(announcer.beginTextBatch(), isFalse, reason: '剛唸完一批，要等冷卻');
+
+      clock.advance(announcer.textCooldown + const Duration(milliseconds: 1));
+      expect(announcer.beginTextBatch(), isTrue);
+      expect(announcer.enqueueText('出口'), isTrue);
+    });
+
+    test('識字冷卻存在且比障礙物冷卻短（主動想知道 vs 被動必須知道）', () {
+      // 讓位不再看 globalCooldown（改看「是否真的在出聲」），
+      // 但識字自己的冷卻仍然要比障礙物的短——否則招牌會太少唸到。
+      expect(announcer.textCooldown, greaterThan(Duration.zero));
+      expect(announcer.textCooldown, lessThan(announcer.globalCooldown));
+    });
+
+    test('禁播時文字也不說', () {
+      announcer.enabled = false;
+      expect(announcer.beginTextBatch(), isFalse);
+    });
+
+    test('空字串不佔用語音', () {
+      expect(announcer.enqueueText(''), isFalse);
+      expect(announcer.enqueueText('   '), isFalse);
+      expect(announcer.beginTextBatch(), isTrue, reason: '沒有真的說話，不該進冷卻');
+    });
+
+    test('reset 會清掉文字冷卻', () async {
+      announcer.beginTextBatch();
+      announcer.enqueueText('麥當勞');
+      await announcer.lastSpeech;
+      announcer.endTextBatch();
+      expect(announcer.beginTextBatch(), isFalse);
+
+      announcer.reset();
+      expect(announcer.lastTextAt, isNull);
+      expect(announcer.beginTextBatch(), isTrue);
+    });
+
+    test('文字播報不會記進障礙物歷史（那是防抖證據，不該被灌）', () {
+      announcer.beginTextBatch();
+      announcer.enqueueText('麥當勞');
+      expect(announcer.history, isEmpty);
+    });
+  });
+}

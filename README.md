@@ -26,6 +26,8 @@ Android 真机（Xiaomi 2609FRA74T / Snapdragon 685）实测：
 | 指标口径 | 以上是**对老师标注的保真度**，不是真实准确率；真实数字需人工核验的抽样集（约 30 帧，未做） |
 | 功能 | 实时画框 + 中文标签 + HUD 诊断 + 阈值滑条 + 粤语播报（分数门槛 0.70 才开口） |
 
+引导播报会对行人、垃圾桶与单车尝试提供**粗略米数估计**：使用 Android 相机焦距/感光元件尺寸校准，并套用典型高度假设（行人 1.70 m、垃圾桶 0.75 m、单车 1.00 m）。这些假设尚未针对个别物件或真机实测验证；个体尺寸、遮挡、检测框误差与镜头裁切都会影响结果。框被画面边缘截断、相机未提供校准资料或类别不支持时，不报告距离。估算只供参考，**不能替代手杖、导盲犬或其他安全辅助**；iOS 目前不提供距离估算。
+
 ---
 
 ## 快速开始
@@ -41,6 +43,53 @@ cd app; flutter analyze; flutter test; cd ..
 .\scripts\verify_on_device.ps1        # 自动装包→唤醒→启动→截图→抓 HUD 日志
 # 或手动：cd app; flutter run -d <device-id>
 ```
+
+### 手机上预览界面
+
+电脑与手机连接同一 Wi-Fi 后，可从 `app/` 目录启动纯界面网页预览：
+
+```powershell
+flutter run -d web-server --web-hostname 0.0.0.0 --web-port 8765 --target lib\main_web_preview.dart
+```
+
+在手机浏览器打开 `http://<电脑的局域网 IP>:8765/`。这是仅供查看和切换画面的预览；
+相机、物件识别和语音播报不可用，也不是公开互联网网址。离开电脑或停止命令后，链接会失效。
+
+### App 内目的地步行导航
+
+PathGuide 引导页现有「目的地导航」入口，可在 App 内输入或说出香港目的地，
+选择 Google Places 搜寻结果后，在内嵌 Google Navigation 画面开始步行导航。
+导航会先请求位置权限及 Google 导航条款同意。请保持网络与定位开启。
+步行路线只供参考，不能取代手杖、导盲犬或对周围环境的留意。
+
+首次使用前，在 Google Cloud 建立已启用结算的专案，并启用对应平台的
+**Navigation SDK、Maps SDK**，以及 **Places API (New)**。Maps key 须限制到对应平台的
+Navigation/Maps SDK；Places key 须限制到 Places API (New)。请为每个平台建立
+独立、受应用限制的 key：Android key 限制到 `hk.pathguide.pathguide` 及该签署凭证的
+SHA-1；iOS key 限制到 bundle ID `hk.pathguide.pathguide`。不要把 key 写进源码或提交至 Git。
+
+在 Mac 设定该平台的 key 后，传入 Dart defines。iOS 使用 iOS 专用 key：
+
+```bash
+flutter run -d <iphone-device-id> \
+  --dart-define="MAPS_API_KEY=$IOS_MAPS_API_KEY" \
+  --dart-define="PLACES_API_KEY=$IOS_PLACES_API_KEY"
+```
+
+Android 使用 Android 专用 key，并提供该签署凭证的 SHA-1（去掉冒号）：
+
+```bash
+flutter run -d <android-device-id> \
+  --dart-define="MAPS_API_KEY=$ANDROID_MAPS_API_KEY" \
+  --dart-define="PLACES_API_KEY=$ANDROID_PLACES_API_KEY" \
+  --dart-define="ANDROID_CERT_SHA1=$ANDROID_CERT_SHA1"
+```
+
+iOS 最低版本为 16.0，Android 最低版本为 API 24。`google_navigation_flutter`
+目前为 Beta；其 iOS 整合要求 Swift Package Manager。此 Windows 环境无法执行
+Xcode/iPhone 真机验证，请在 Mac 上首次构建时检查 Flutter 对本项目现有 CocoaPods
+依赖与 Swift Package Manager 的整合结果，并以真机验证定位、语音输入及步行路线。
+Google Navigation SDK 会显示其条款与地图归属；Places 搜寻结果旁会显示 Google 官方标志。
 
 ## 标注与训练流水线
 
@@ -72,7 +121,7 @@ label.cmd
 
 ```powershell
 python -m pytest                          # 374 个测试
-cd app; flutter analyze; flutter test     # 77 个测试
+cd app; flutter analyze; flutter test     # 239 个测试
 python scripts\check_kotlin_compiles.py   # Kotlin 编译检查（不需要 Gradle）
 python scripts\check_tflite_decode.py     # 模型 ↔ 原生解码假设的一致性
 python scripts\gen_dart_labels.py --check # 类别表是否与唯一的源同步

@@ -1,6 +1,7 @@
 package hk.pathguide.pathguide
 
 import android.content.Context
+import android.hardware.camera2.CameraCharacteristics
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.ImageFormat
@@ -10,6 +11,7 @@ import android.graphics.YuvImage
 import android.util.Log
 import android.util.Size
 import androidx.camera.core.CameraSelector
+import androidx.camera.camera2.interop.Camera2CameraInfo
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
@@ -148,6 +150,10 @@ class VisionPlugin(
         private set
     @Volatile var lastFrameHeight: Int = 0
         private set
+
+    @Volatile private var focalLengthMm: Double? = null
+    @Volatile private var sensorPhysicalWidthMm: Double? = null
+    @Volatile private var sensorPhysicalHeightMm: Double? = null
 
     /** 最近一帧的格式描述（平面数、旋转角、UV 步长），用于核对取帧假设。 */
     @Volatile var lastFrameFormat: String = ""
@@ -685,9 +691,26 @@ class VisionPlugin(
             .also { it.setAnalyzer(executor) { proxy -> analyze(proxy) } }
 
         provider.unbindAll()
-        provider.bindToLifecycle(
+        val camera = provider.bindToLifecycle(
             owner, CameraSelector.DEFAULT_BACK_CAMERA, previewUseCase, analysis,
         )
+        val camera2Info = Camera2CameraInfo.from(camera.cameraInfo)
+        val focalLengths = camera2Info.getCameraCharacteristic(
+            CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS,
+        )
+        val sensorSize = camera2Info.getCameraCharacteristic(
+            CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE,
+        )
+        val calibratedFocalLength = focalLengths?.firstOrNull()?.toDouble()
+            ?.takeIf { it.isFinite() && it > 0 }
+        val physicalWidth = sensorSize?.width?.toDouble()?.takeIf { it > 0 }
+        val physicalHeight = sensorSize?.height?.toDouble()?.takeIf { it > 0 }
+        focalLengthMm = calibratedFocalLength
+        sensorPhysicalWidthMm = physicalWidth
+        sensorPhysicalHeightMm = physicalHeight
+        if (calibratedFocalLength == null || physicalWidth == null || physicalHeight == null) {
+            Log.w(TAG, "相機未提供有效的焦距校準資料；距離估算將不可用")
+        }
         Log.i(TAG, "相机会话已启动（预览 + 分析）")
     }
 
@@ -1179,6 +1202,11 @@ class VisionPlugin(
                 "inferenceMs" to ms,
                 "frameWidth" to w,
                 "frameHeight" to h,
+                "focalLengthVerticalPixels" to focalLengthVerticalPixels(
+                    width = w,
+                    height = h,
+                    rotationDegrees = rotation,
+                ),
                 "analyzedFrames" to analyzedFrames,
                 "analyzeErrors" to analyzeErrors,
                 "skippedReason" to lastAnalyzeSkip,
@@ -1201,6 +1229,27 @@ class VisionPlugin(
         } finally {
             image.close()
         }
+    }
+
+    private fun focalLengthVerticalPixels(
+        width: Int,
+        height: Int,
+        rotationDegrees: Int,
+    ): Double? {
+        val focal = focalLengthMm ?: return null
+        val sensorWidth = sensorPhysicalWidthMm ?: return null
+        val sensorHeight = sensorPhysicalHeightMm ?: return null
+        if (!focal.isFinite() || focal <= 0 || sensorWidth <= 0 || sensorHeight <= 0) {
+            return null
+        }
+
+        // Detection boxes use upright coordinates, so portrait rotation swaps sensor axes.
+        val pixels = if (rotationDegrees % 180 == 90) {
+            focal / sensorWidth * width
+        } else {
+            focal / sensorHeight * height
+        }
+        return pixels.takeIf { it.isFinite() && it > 0 }
     }
 
     /**

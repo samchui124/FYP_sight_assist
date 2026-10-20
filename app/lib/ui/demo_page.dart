@@ -16,6 +16,7 @@ import '../vision/platform_vision.dart';
 import '../vision/vision_preview.dart';
 import '../vision/vision_session.dart';
 import '../vision/vision_source.dart';
+import 'navigation_page.dart';
 
 /// 領路通的主畫面——**整個 App 唯一的畫面**。
 ///
@@ -69,7 +70,8 @@ class _DemoPageState extends State<DemoPage> with WidgetsBindingObserver {
   /// 沒注入就自己建一個——這樣「直接開這一頁」（測試、或未來深層連結）
   /// 仍然可以運作，但正式流程由 `HomePage` 注入共用的那一個，
   /// 讓相機在兩個模式之間**保持開啟**（重啟要 1–2 秒）。
-  late final VisionSession _session = widget.session ??
+  late final VisionSession _session =
+      widget.session ??
       VisionSession(
         speaker: widget.speaker,
         sourceFactory: widget.sourceFactory,
@@ -138,7 +140,6 @@ class _DemoPageState extends State<DemoPage> with WidgetsBindingObserver {
   /// 所以任何狀態變化都要有一句話能說出來。
   String _status = '';
 
-
   /// 幀尺寸与旋转角都来自 [VisionSource]，不在 UI 里写常量。
   Size get _frameSize => _source?.frameSize ?? const Size(1280, 720);
 
@@ -165,9 +166,7 @@ class _DemoPageState extends State<DemoPage> with WidgetsBindingObserver {
     // 少了這一段，使用者切去別的地方再回來，畫面會停在「已停止引導」，
     // 而且沒有任何東西會把它叫回來——**看起來像 App 壞了**。
     // SystemChrome / Flutter 不會幫我們重啟相機，這件事只有這裡能做。
-    if (state == AppLifecycleState.resumed &&
-        _pausedByLifecycle &&
-        !_guiding) {
+    if (state == AppLifecycleState.resumed && _pausedByLifecycle && !_guiding) {
       _pausedByLifecycle = false;
       unawaited(_startGuidance());
     }
@@ -200,7 +199,8 @@ class _DemoPageState extends State<DemoPage> with WidgetsBindingObserver {
       final sys = WidgetsBinding.instance.platformDispatcher.locale;
       final sysLang = sys.languageCode.toLowerCase();
       final used = lang.toLowerCase().replaceAll('_', '-');
-      final matched = used == sysLang ||
+      final matched =
+          used == sysLang ||
           used.startsWith('$sysLang-') ||
           (sysLang == 'zh' &&
               (used.startsWith('zh') || used.startsWith('yue'))) ||
@@ -210,7 +210,9 @@ class _DemoPageState extends State<DemoPage> with WidgetsBindingObserver {
         // 語音包不匹配是**使用者必須知道**的事（他會聽到奇怪的語言），
         // 所以還是要唸；同時寫進 logcat 供事後診斷。
         _say(_s.ttsFallbackWarning(lang));
-        debugPrint('[PathGuide] TTS fallback: $lang (system=${sys.toLanguageTag()})');
+        debugPrint(
+          '[PathGuide] TTS fallback: $lang (system=${sys.toLanguageTag()})',
+        );
       }
     }
   }
@@ -363,34 +365,36 @@ class _DemoPageState extends State<DemoPage> with WidgetsBindingObserver {
   void _writeStatus() {
     final log = _statusLog;
     if (log == null) return;
-    unawaited(log.write(<String, Object?>{
-      'frames': _frames,
-      'fps': _fps,
-      'inferenceMs': _inferenceMs,
-      'detections': _detections.length,
-      'guiding': _guiding,
-      'voice': _speakEnabled,
-      // 機會式讀字的狀態。這幾個數字決定「招牌多久被唸一次」，
-      // 而那是真機上唯一能回答「有沒有在搶 CPU」的證據。
-      'spotAttempts': _spotter.attempts,
-      'spotEmptyStreak': _spotter.consecutiveEmpty,
-      'spotIntervalMs': _spotter.currentInterval.inMilliseconds,
-      'spotLastReason': _spotter.lastReason,
-      'spotLastText': _spotter.lastText,
-      // ★ 以下三項是為了分開「沒讀到字」與「讀到卻沒出聲」。
-      //
-      // 沒有它們時，這兩種情況在狀態檔裡長得**一模一樣**（都只是沒聲音），
-      // 於是只能靠猜。而真機上實際發生的正是後者：OCR 讀到了字，
-      // 卻被播報讓位規則丟掉。
-      'spotLastElements': _lastReadElements,
-      'spotSpoken': _spokenCount,
-      'spotDeferred': _spotter.deferrals,
-      // 語音若整個 session 都發不出聲，這裡會有原因。
-      'ttsError': switch (_speaker) {
-        final FlutterTtsSpeaker s => s.lastSpeechError,
-        _ => null,
-      },
-    }));
+    unawaited(
+      log.write(<String, Object?>{
+        'frames': _frames,
+        'fps': _fps,
+        'inferenceMs': _inferenceMs,
+        'detections': _detections.length,
+        'guiding': _guiding,
+        'voice': _speakEnabled,
+        // 機會式讀字的狀態。這幾個數字決定「招牌多久被唸一次」，
+        // 而那是真機上唯一能回答「有沒有在搶 CPU」的證據。
+        'spotAttempts': _spotter.attempts,
+        'spotEmptyStreak': _spotter.consecutiveEmpty,
+        'spotIntervalMs': _spotter.currentInterval.inMilliseconds,
+        'spotLastReason': _spotter.lastReason,
+        'spotLastText': _spotter.lastText,
+        // ★ 以下三項是為了分開「沒讀到字」與「讀到卻沒出聲」。
+        //
+        // 沒有它們時，這兩種情況在狀態檔裡長得**一模一樣**（都只是沒聲音），
+        // 於是只能靠猜。而真機上實際發生的正是後者：OCR 讀到了字，
+        // 卻被播報讓位規則丟掉。
+        'spotLastElements': _lastReadElements,
+        'spotSpoken': _spokenCount,
+        'spotDeferred': _spotter.deferrals,
+        // 語音若整個 session 都發不出聲，這裡會有原因。
+        'ttsError': switch (_speaker) {
+          final FlutterTtsSpeaker s => s.lastSpeechError,
+          _ => null,
+        },
+      }),
+    );
   }
 
   /// 最近一次 OCR 讀到的元素數。0 表示真的沒看到字。
@@ -417,6 +421,8 @@ class _DemoPageState extends State<DemoPage> with WidgetsBindingObserver {
 
   void _onFrame(VisionFrame frame) {
     if (!mounted) return;
+    final source = _source;
+    if (source == null) return;
     final now = DateTime.now();
     final dt = now.difference(_lastFrameAt).inMicroseconds;
     _lastFrameAt = now;
@@ -425,7 +431,16 @@ class _DemoPageState extends State<DemoPage> with WidgetsBindingObserver {
     // **不再按阈值过滤**：阈值已在来源内部生效（原生侧丢弃低分框）。
     // 两处各过滤一次时，不一致的表现是「框数对不上」，且不报错。
     _announcer.enabled = _speakEnabled;
-    if (_speakEnabled) _announcer.onFrame(frame.detections);
+    if (_speakEnabled) {
+      final frameHeightPixels = source.rotationDegrees % 180 == 90
+          ? frame.frameWidth.toDouble()
+          : frame.frameHeight.toDouble();
+      _announcer.onFrame(
+        frame.detections,
+        focalLengthVerticalPixels: frame.focalLengthVerticalPixels,
+        frameHeightPixels: frameHeightPixels,
+      );
+    }
 
     // 機會式讀字：**只有在偵測的空檔才做**，所以不 await——
     // 在這裡 await 就是把它變成「與偵測並行」，那正是要避免的事。
@@ -588,6 +603,11 @@ class _DemoPageState extends State<DemoPage> with WidgetsBindingObserver {
     );
   }
 
+  void _returnToHome() {
+    if (_guiding) _stopGuidance();
+    Navigator.of(context).pop();
+  }
+
   Widget _header() {
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 10, 16, 6),
@@ -618,10 +638,7 @@ class _DemoPageState extends State<DemoPage> with WidgetsBindingObserver {
         // （旋转已由原生在采样时逐像素完成），所以这里直接用，
         // 映射时也不再施加旋转——见 [mapDetectionsToScreen] 的说明。
         final fit = DisplayFit.contain(frame: _frameSize, view: viewSize);
-        final mapped = mapDetectionsToScreen(
-          detections: _detections,
-          fit: fit,
-        );
+        final mapped = mapDetectionsToScreen(detections: _detections, fit: fit);
 
         return Stack(
           fit: StackFit.expand,
@@ -630,10 +647,7 @@ class _DemoPageState extends State<DemoPage> with WidgetsBindingObserver {
             // 叠加层不能拦截手势，否则下方的预览收不到事件。
             IgnorePointer(
               child: CustomPaint(
-                painter: DetectionBoxPainter(
-                  mapped: mapped,
-                  showLabels: true,
-                ),
+                painter: DetectionBoxPainter(mapped: mapped, showLabels: true),
               ),
             ),
           ],
@@ -666,8 +680,8 @@ class _DemoPageState extends State<DemoPage> with WidgetsBindingObserver {
 
   /// 底部動作區。
   ///
-  /// 引導中時三個可操作項（語音、採集、結束引導），未啟動時只有一個
-  /// （啟動引導）——因為另外兩個在沒有相機時都只會回一句「請先啟動引導」。
+  /// 引導控制、文字/語音目的地導航與返回入口集中在底部，讓視障使用者
+  /// 不必在畫面中搜尋分散的模式切換。
   Widget _actionArea() {
     return Container(
       width: double.infinity,
@@ -690,8 +704,35 @@ class _DemoPageState extends State<DemoPage> with WidgetsBindingObserver {
               ],
             ],
           ),
+          const SizedBox(height: 10),
+          SizedBox(
+            height: 48,
+            child: OutlinedButton.icon(
+              onPressed: _returnToHome,
+              icon: const Icon(Icons.arrow_back, size: 22),
+              label: Text(_s.backToHome),
+            ),
+          ),
+          const SizedBox(height: 10),
+          SizedBox(
+            height: 48,
+            child: OutlinedButton.icon(
+              onPressed: _openNavigation,
+              icon: const Icon(Icons.directions_walk, size: 22),
+              label: Text(_s.navigation),
+            ),
+          ),
         ],
       ),
+    );
+  }
+
+  Future<void> _openNavigation() async {
+    if (_guiding) _stopGuidance();
+    await _session.releaseCamera();
+    if (!mounted) return;
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute<void>(builder: (_) => const NavigationPage()),
     );
   }
 
@@ -706,7 +747,11 @@ class _DemoPageState extends State<DemoPage> with WidgetsBindingObserver {
         textAlign: TextAlign.center,
         maxLines: 2,
         overflow: TextOverflow.ellipsis,
-        style: const TextStyle(color: Colors.white70, fontSize: 14, height: 1.4),
+        style: const TextStyle(
+          color: Colors.white70,
+          fontSize: 14,
+          height: 1.4,
+        ),
       ),
     );
   }

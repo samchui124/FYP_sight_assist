@@ -68,9 +68,8 @@ class AppStrings {
 
   String get errorCopied => _zh ? '錯誤詳情已複製' : 'Error details copied';
 
-  String sourceInitFailed(String name) => _zh
-      ? '$name 初始化失敗（長按複製）'
-      : '$name failed to start (long-press to copy)';
+  String sourceInitFailed(String name) =>
+      _zh ? '$name 初始化失敗（長按複製）' : '$name failed to start (long-press to copy)';
 
   String get sourceFallback => _zh ? '來源' : 'Source';
 
@@ -123,9 +122,8 @@ class AppStrings {
 
   String get reasonForced => _zh ? '強制播報' : 'forced speak';
 
-  String scoreBelowFloor(String score, String floor) => _zh
-      ? '分數 $score 低於播報門檻 $floor'
-      : 'score $score below speak floor $floor';
+  String scoreBelowFloor(String score, String floor) =>
+      _zh ? '分數 $score 低於播報門檻 $floor' : 'score $score below speak floor $floor';
 
   String get perClassCooldown => _zh ? '同類冷卻未過' : 'per-class cooldown';
 
@@ -157,21 +155,21 @@ class AppStrings {
 
   String get modelManifestBad => _zh ? '模型清單有問題' : 'Model manifest invalid';
 
-  String get modelManifestMismatch => _zh ? '模型與清單不符' : 'Model/manifest mismatch';
+  String get modelManifestMismatch =>
+      _zh ? '模型與清單不符' : 'Model/manifest mismatch';
 
   String modelManifestMismatchDetail({
     required int modelClassCount,
     required String version,
     required int declaredCount,
     required Object declaredIds,
-  }) =>
-      _zh
-          ? '模型報告 $modelClassCount 類，而清單（$version）聲明 '
-              'modelClassCount=$declaredCount、modelClassIds=$declaredIds。'
-              '兩者必須一致——猜一個映射會把框標成別的類，而且不會報錯。'
-          : 'Model reports $modelClassCount classes, but manifest ($version) declares '
-              'modelClassCount=$declaredCount, modelClassIds=$declaredIds. '
-              'They must match — guessing a mapping mislabels boxes silently.';
+  }) => _zh
+      ? '模型報告 $modelClassCount 類，而清單（$version）聲明 '
+            'modelClassCount=$declaredCount、modelClassIds=$declaredIds。'
+            '兩者必須一致——猜一個映射會把框標成別的類，而且不會報錯。'
+      : 'Model reports $modelClassCount classes, but manifest ($version) declares '
+            'modelClassCount=$declaredCount, modelClassIds=$declaredIds. '
+            'They must match — guessing a mapping mislabels boxes silently.';
 
   String get modelNotLoaded => _zh ? '模型未載入' : 'Model not loaded';
 
@@ -179,10 +177,9 @@ class AppStrings {
     required int classCount,
     required Object inputSize,
     String mappingNote = '',
-  }) =>
-      _zh
-          ? '模型已載入（類別數 $classCount，輸入 $inputSize）$mappingNote'
-          : 'Model loaded ($classCount classes, input $inputSize)$mappingNote';
+  }) => _zh
+      ? '模型已載入（類別數 $classCount，輸入 $inputSize）$mappingNote'
+      : 'Model loaded ($classCount classes, input $inputSize)$mappingNote';
 
   String get webCameraNotStarted =>
       _zh ? '瀏覽器相機未啟動' : 'Browser camera not started';
@@ -217,7 +214,13 @@ class AppStrings {
   String get starting => _zh ? '正在啟動引導' : 'Starting guidance';
 
   /// 引導中，狀態列文字（也會被唸出來）。
-  String get guiding => _zh ? '正在引導，前方有障礙物會出聲' : 'Guiding — obstacles will be announced';
+  String get guiding => _zh
+      ? '正在引導，前方有障礙物會出聲。距離只供參考，請勿單靠估算行走'
+      : 'Guiding — obstacles will be announced. Distance is approximate; do not rely on it alone.';
+
+  String distanceAnnouncement(String objectName, int meters) => _zh
+      ? '$objectName，約 $meters 米'
+      : '$objectName, approximately $meters metres away';
 
   /// 引導已停止（回到未啟動狀態）。
   String get guidanceStopped => _zh ? '已停止引導' : 'Guidance stopped';
@@ -269,12 +272,64 @@ class AppStrings {
   String get modeGuidanceHint =>
       _zh ? '偵測前方障礙物並出聲提醒' : 'Detect obstacles ahead and announce them';
 
+  String get navigation => _zh ? '目的地導航' : 'Navigate to destination';
+
+  String get navigationHint => _zh
+      ? '輸入或說出目的地，在 App 內接收步行導航'
+      : 'Speak or type a destination for in-app walking directions';
+
+  String get destination => _zh ? '目的地' : 'Destination';
+
+  String get destinationHint =>
+      _zh ? '搜尋香港的地點或地址' : 'Search for a place or address in Hong Kong';
+
+  String get speakDestination => _zh ? '說出目的地' : 'Speak destination';
+
+  String get stopListening => _zh ? '停止聆聽' : 'Stop listening';
+
+  String get googlePlacesAttribution =>
+      _zh ? 'Google 地點搜尋 · Google' : 'Google Places · Google';
+
+  String get googleMapsKeyMissing =>
+      _zh ? '尚未設定 Google Maps API 金鑰' : 'Google Maps API key is not configured';
+
+  String get googlePlacesKeyMissing => _zh
+      ? '尚未設定 Google Places API 金鑰'
+      : 'Google Places API key is not configured';
+
+  String get locationPermissionDenied => _zh
+      ? '需要位置權限才能計算步行路線'
+      : 'Location permission is needed to calculate a walking route';
+
+  String get navigationPreparing =>
+      _zh ? '正在準備步行路線…' : 'Preparing your walking route…';
+
+  String get navigationLocationWaiting =>
+      _zh ? '正在取得目前位置，請稍候…' : 'Waiting for your current location…';
+
+  String get navigationNoResults =>
+      _zh ? '沒有找到地點，請試試其他名稱' : 'No places found. Try another search.';
+
+  String get navigationSearchFailed => _zh
+      ? '地點搜尋失敗，請檢查網絡與 API 設定'
+      : 'Place search failed. Check your connection and API setup.';
+
+  String get navigationRouteFailed => _zh
+      ? '無法計算步行路線，請選擇其他目的地或重試'
+      : 'Could not calculate a walking route. Choose another destination or try again.';
+
+  String get navigationSafetyNotice => _zh
+      ? '步行路線只供參考。請使用手杖、導盲犬或其他安全輔助，並留意周圍環境。'
+      : 'Walking directions are a guide only. Use your cane, guide dog, or other mobility aid and stay aware of your surroundings.';
+
+  String get noSpeechResult =>
+      _zh ? '未聽到目的地，請再試一次或輸入文字' : 'No destination heard. Try again or type it.';
+
   /// 模式二：讀字（招牌、菜單、指示牌……）。
   String get modeReadText => _zh ? '讀字' : 'Read text';
 
-  String get modeReadTextHint => _zh
-      ? '讀招牌、菜單、指示牌上的文字'
-      : 'Read text on signs, menus and notices';
+  String get modeReadTextHint =>
+      _zh ? '讀招牌、菜單、指示牌上的文字' : 'Read text on signs, menus and notices';
 
   // --- 讀字畫面 ---
 
@@ -302,5 +357,7 @@ class AppStrings {
 /// Localized display / speak name for a detection label.
 String labelDisplayName(Label label, [AppLanguage? language]) {
   final lang = language ?? AppLocale.current;
-  return lang == AppLanguage.zh ? label.nameZh : label.nameEn.replaceAll('_', ' ');
+  return lang == AppLanguage.zh
+      ? label.nameZh
+      : label.nameEn.replaceAll('_', ' ');
 }

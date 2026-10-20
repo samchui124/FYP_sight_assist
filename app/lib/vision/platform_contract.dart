@@ -126,6 +126,10 @@ abstract final class VisionKeys {
   static const String frameWidth = 'frameWidth';
   static const String frameHeight = 'frameHeight';
 
+  /// Native camera focal length projected onto the upright frame's vertical axis.
+  /// Null when camera calibration metadata is unavailable.
+  static const String focalLengthVerticalPixels = 'focalLengthVerticalPixels';
+
   /// 把原始帧转成正立所需顺时针旋转的角度：0 / 90 / 180 / 270。
   ///
   /// 由 Dart 侧算出并传入，因为旋转由「相机传感器朝向 + 设备方向」决定，

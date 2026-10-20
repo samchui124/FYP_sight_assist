@@ -1,4 +1,4 @@
-﻿import 'dart:ui' show Size;
+import 'dart:ui' show Size;
 
 import 'detection.dart';
 
@@ -9,6 +9,7 @@ class VisionFrame {
     required this.inferenceMs,
     required this.frameWidth,
     required this.frameHeight,
+    this.focalLengthVerticalPixels,
   });
 
   final List<Detection> detections;
@@ -22,6 +23,11 @@ class VisionFrame {
   /// 「框整体偏移」的第一嫌疑。
   final int frameWidth;
   final int frameHeight;
+
+  /// Focal length projected onto the upright frame's vertical axis.
+  ///
+  /// Null when the native camera cannot provide calibration metadata.
+  final double? focalLengthVerticalPixels;
 }
 
 /// 一次初始化尝试的结果。
@@ -30,19 +36,24 @@ class VisionFrame {
 /// 显示**可操作的原因**，而不是把界面打崩。抛异常的实现最终还是要被
 /// 调用方 catch 后转成文案，不如在类型上就写清楚。
 class VisionSourceStatus {
-  const VisionSourceStatus({required this.ok, required this.message, this.error});
+  const VisionSourceStatus({
+    required this.ok,
+    required this.message,
+    this.error,
+  });
 
   final bool ok;
 
   /// 面向用户的说明（成功也要有，例如「模型已加载，N 类」——N 由模型清单决定，
-/// 不要写死，类别表会随版本增长）。
+  /// 不要写死，类别表会随版本增长）。
   final String message;
 
   /// 失败细节，供诊断面板显示。成功时为 null。
   final String? error;
 
   @override
-  String toString() => 'VisionSourceStatus(ok=$ok, message=$message, error=$error)';
+  String toString() =>
+      'VisionSourceStatus(ok=$ok, message=$message, error=$error)';
 }
 
 /// 检测结果来源的抽象接口。
@@ -218,8 +229,8 @@ class VisionDiagnostics {
   final bool transposed;
 
   @override
-  String toString() => 'analyzed=$analyzedFrames errors=$analyzeErrors '
+  String toString() =>
+      'analyzed=$analyzedFrames errors=$analyzeErrors '
       'skip="$skippedReason" frame=${frameWidth}x$frameHeight '
       'maxScore=${frameMaxScore.toStringAsFixed(3)}';
 }
-

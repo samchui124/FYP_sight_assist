@@ -56,12 +56,12 @@ class PlatformVision implements VisionSource {
     EventChannel? events,
     this.rotationDegrees = 90,
     bool? supportsTextReading,
-  })  : _method = method ?? const MethodChannel(kVisionChannel),
-        _events = events ?? const EventChannel(kFrameChannel),
-        // 預設依平台推斷：目前只有 Android 的 VisionPlugin 有 readText。
-        // 做成可覆寫的參數是為了讓呼叫端（與測試）能明確表達，
-        // 而不是散在各處寫 `Platform.isAndroid`。
-        _supportsTextReading = supportsTextReading ?? Platform.isAndroid;
+  }) : _method = method ?? const MethodChannel(kVisionChannel),
+       _events = events ?? const EventChannel(kFrameChannel),
+       // 預設依平台推斷：目前只有 Android 的 VisionPlugin 有 readText。
+       // 做成可覆寫的參數是為了讓呼叫端（與測試）能明確表達，
+       // 而不是散在各處寫 `Platform.isAndroid`。
+       _supportsTextReading = supportsTextReading ?? Platform.isAndroid;
 
   final MethodChannel _method;
   final EventChannel _events;
@@ -83,6 +83,7 @@ class PlatformVision implements VisionSource {
   String? _loadError;
   int _inputSize = 0;
   int _modelClassCount = 0;
+
   /// 传给原生的索引映射表（空表 = 不需要映射）。initialize() 里算出来后写入。
   List<int> _classIds = const <int>[];
   double _threshold = 0.30;
@@ -176,11 +177,12 @@ class PlatformVision implements VisionSource {
     // 4) 加载模型。**先按「不映射」加载**，拿到模型真实的类别数，再与清单对照。
     //    先读形状再校验，才能在「模型与清单不符」时**报错**而不是安静地标错类。
     var ok = await _loadModel(const <int>[]);
-    ModelClassMapping? mapping =
-        ok ? resolveMapping(
-                modelClassCount: _modelClassCount,
-                declared: manifest.modelClassIds,
-              ) : null;
+    ModelClassMapping? mapping = ok
+        ? resolveMapping(
+            modelClassCount: _modelClassCount,
+            declared: manifest.modelClassIds,
+          )
+        : null;
     if (ok && mapping == null) {
       // 模型与清单对不上：宁可失败也不猜。
       return VisionSourceStatus(
@@ -215,8 +217,9 @@ class PlatformVision implements VisionSource {
         error: s.cameraNotStartedDetail,
       );
     }
-    final mappingNote =
-        mappingFinal != null ? '；${mappingFinal.describe()}' : '';
+    final mappingNote = mappingFinal != null
+        ? '；${mappingFinal.describe()}'
+        : '';
     return VisionSourceStatus(
       ok: true,
       message: s.modelLoaded(
@@ -382,7 +385,10 @@ class PlatformVision implements VisionSource {
       throw StateError('原生未返回可写的模型目录');
     }
     final data = await rootBundle.load(assetKey);
-    final bytes = data.buffer.asUint8List(data.offsetInBytes, data.lengthInBytes);
+    final bytes = data.buffer.asUint8List(
+      data.offsetInBytes,
+      data.lengthInBytes,
+    );
 
     final target = '$dir/detector.tflite';
     // 已存在且大小一致就跳过写盘：模型约 10 MB，每次启动都写没必要。
@@ -398,10 +404,10 @@ class PlatformVision implements VisionSource {
     if (existing == bytes.length) {
       return target;
     }
-    await _method.invokeMethod<void>(
-      VisionMethods.writeFile,
-      <String, Object>{VisionKeys.path: target, VisionKeys.bytes: bytes},
-    );
+    await _method.invokeMethod<void>(VisionMethods.writeFile, <String, Object>{
+      VisionKeys.path: target,
+      VisionKeys.bytes: bytes,
+    });
     return target;
   }
 
@@ -478,6 +484,9 @@ class PlatformVision implements VisionSource {
       inferenceMs: _asDouble(raw[VisionKeys.inferenceMs]) ?? 0,
       frameWidth: w,
       frameHeight: h,
+      focalLengthVerticalPixels: _asDouble(
+        raw[VisionKeys.focalLengthVerticalPixels],
+      ),
     );
   }
 
@@ -520,4 +529,3 @@ class PlatformVision implements VisionSource {
     return out;
   }
 }
-

@@ -1,7 +1,25 @@
+import java.util.Base64
+
 plugins {
     id("com.android.application")
     // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
     id("dev.flutter.flutter-gradle-plugin")
+}
+
+fun findDartDefineValue(name: String): String? {
+    val encodedDefines = project.findProperty("dart-defines") as? String ?: return null
+    for (encoded in encodedDefines.split(",")) {
+        val decoded = try {
+            String(Base64.getDecoder().decode(encoded), Charsets.UTF_8)
+        } catch (_: IllegalArgumentException) {
+            continue
+        }
+        val separator = decoded.indexOf('=')
+        if (separator > 0 && decoded.substring(0, separator) == name) {
+            return decoded.substring(separator + 1)
+        }
+    }
+    return null
 }
 
 android {
@@ -10,18 +28,22 @@ android {
     ndkVersion = flutter.ndkVersion
 
     compileOptions {
+        isCoreLibraryDesugaringEnabled = true
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
 
     defaultConfig {
         applicationId = "hk.pathguide.pathguide"
-        // CameraX 1.6 需要 API 21+；LiteRT 2.2 需要 API 21+。
-        // 直接用 flutter.minSdkVersion，若低于 21 再显式提高。
-        minSdk = maxOf(flutter.minSdkVersion, 21)
+        // Google Navigation SDK supports Android API 24 and newer.
+        minSdk = maxOf(flutter.minSdkVersion, 24)
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+        manifestPlaceholders["MAPS_API_KEY"] =
+            providers.environmentVariable("MAPS_API_KEY").orNull
+                ?: findDartDefineValue("MAPS_API_KEY")
+                ?: ""
     }
 
     buildTypes {
@@ -47,6 +69,8 @@ kotlin {
 }
 
 dependencies {
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs_nio:2.1.5")
+
     // CameraX：预览 + 图像分析共用同一个相机会话。
     // 版本已在 Google Maven 上确认为稳定版（1.6.2）。
     val cameraxVersion = "1.6.2"

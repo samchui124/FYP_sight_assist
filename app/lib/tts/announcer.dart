@@ -3,6 +3,7 @@ import 'dart:async';
 import '../l10n/app_locale.dart';
 import '../l10n/app_strings.dart';
 import '../vision/detection.dart';
+import '../vision/distance_estimator.dart';
 import '../vision/labels.dart';
 
 /// 播报所需的**最低置信度**，与「显示门槛」是两件事。
@@ -119,10 +120,11 @@ class Announcer {
     // prefer_initializing_formals 建议改成 `required this._speaker`，
     // 但那会把下划线私有名暴露成公开参数标签，宁可保留显式赋值。
     // ignore: prefer_initializing_formals
-  })  : _speaker = speaker,
-        _clock = clock ?? DateTime.now;
+  }) : _speaker = speaker,
+       _clock = clock ?? DateTime.now;
 
   final Speaker _speaker;
+  final DistanceEstimator _distanceEstimator = const DistanceEstimator();
 
   /// 同一个类别的重复播报冷却。
   final Duration perClassCooldown;
@@ -266,20 +268,26 @@ class Announcer {
   ///
   /// 返回值是**本帧实际发起播报**的那一条（没有则为 null）。
   /// 判定顺序：类别可播报 -> 同类冷却 -> 全局冷却 -> 优先级裁决。
-  Announcement? onFrame(List<Detection> detections, {bool force = false}) {
+  Announcement? onFrame(
+    List<Detection> detections, {
+    bool force = false,
+    double? focalLengthVerticalPixels,
+    double? frameHeightPixels,
+  }) {
     if (detections.isEmpty) return null;
 
     // 按分数取最高的若干个候选，再按播报优先级排序。
-    final candidates = detections
-        .map((d) => (detection: d, label: labelOf(d.id)))
-        .where((c) => c.label != null && c.label!.announced)
-        .toList()
-      ..sort((a, b) {
-        final pa = _rank(a.label!);
-        final pb = _rank(b.label!);
-        if (pa != pb) return pa.compareTo(pb);
-        return b.detection.score.compareTo(a.detection.score);
-      });
+    final candidates =
+        detections
+            .map((d) => (detection: d, label: labelOf(d.id)))
+            .where((c) => c.label != null && c.label!.announced)
+            .toList()
+          ..sort((a, b) {
+            final pa = _rank(a.label!);
+            final pb = _rank(b.label!);
+            if (pa != pb) return pa.compareTo(pb);
+            return b.detection.score.compareTo(a.detection.score);
+          });
 
     final now = _clock();
     for (final c in candidates) {
@@ -296,7 +304,20 @@ class Announcer {
         );
         continue;
       }
-      final text = announceTextFor(label);
+      final distanceMeters =
+          focalLengthVerticalPixels == null || frameHeightPixels == null
+          ? null
+          : _distanceEstimator.estimateMeters(
+              detection: c.detection,
+              focalLengthVerticalPixels: focalLengthVerticalPixels,
+              frameHeightPixels: frameHeightPixels,
+            );
+      final text = distanceMeters == null
+          ? announceTextFor(label)
+          : AppStrings.current.distanceAnnouncement(
+              announceTextFor(label),
+              distanceMeters.round(),
+            );
       _lastByClass[label.id] = now;
       _lastAny = now;
       final s = AppStrings.current;
@@ -345,10 +366,10 @@ class Announcer {
 
   /// 排序权重：P0 先，其次 P1，最后其余。与 `kAnnouncementOrder` 同源。
   static int _rank(Label label) => switch (label.priority) {
-        'P0' => 0,
-        'P1' => 1,
-        _ => 2,
-      };
+    'P0' => 0,
+    'P1' => 1,
+    _ => 2,
+  };
 
   void _record(
     Label label,
@@ -357,13 +378,15 @@ class Announcer {
     DateTime at,
     String reason,
   ) {
-    history.add(Announcement(
-      label: label,
-      score: score,
-      text: text,
-      at: at,
-      reason: reason,
-    ));
+    history.add(
+      Announcement(
+        label: label,
+        score: score,
+        text: text,
+        at: at,
+        reason: reason,
+      ),
+    );
     if (history.length > 50) history.removeAt(0);
   }
 

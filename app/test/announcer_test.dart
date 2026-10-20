@@ -33,21 +33,16 @@ class _Clock {
   DateTime call() => now;
 }
 
-Detection _det(int id, {double score = 0.9}) => Detection(
-      id: id,
-      score: score,
-      cx: 0.5,
-      cy: 0.5,
-      w: 0.2,
-      h: 0.2,
-    );
+Detection _det(int id, {double score = 0.9}) =>
+    Detection(id: id, score: score, cx: 0.5, cy: 0.5, w: 0.2, h: 0.2);
 
 /// `bin`（id=7，P0）作为锚点类。
 final int _binP0Id = kLabels.firstWhere((l) => l.nameEn == 'bin').id;
 
 /// 「另一个可播报类」，用于验证跨类的全局冷却。
-final int _otherAnnouncedId =
-    kLabels.firstWhere((l) => l.announced && l.id != _binP0Id).id;
+final int _otherAnnouncedId = kLabels
+    .firstWhere((l) => l.announced && l.id != _binP0Id)
+    .id;
 
 void main() {
   late _FakeSpeaker speaker;
@@ -82,6 +77,24 @@ void main() {
     final a = await announce(<Detection>[_det(_binP0Id)]);
     expect(a, isNotNull);
     expect(speaker.spoken, hasLength(1));
+    expect(speaker.spoken.single, kLabels[_binP0Id].nameZh);
+  });
+
+  test('校准资料可用时播报支持类别的粗略米数', () async {
+    final a = announcer.onFrame(
+      <Detection>[_det(_binP0Id)],
+      focalLengthVerticalPixels: 1000,
+      frameHeightPixels: 1000,
+    );
+    await announcer.lastSpeech;
+
+    expect(a, isNotNull);
+    expect(speaker.spoken.single, contains('約 4 米'));
+  });
+
+  test('没有相机校准资料时保留原有物件播报', () async {
+    await announce(<Detection>[_det(_binP0Id)]);
+
     expect(speaker.spoken.single, kLabels[_binP0Id].nameZh);
   });
 
@@ -167,9 +180,9 @@ void main() {
     test('刚好达到门槛就播报', () async {
       // 边界取 >=：门槛值本身应当算作「够格」，否则调参时会出现
       // 「设成 0.70 却永远播不出 0.70」这种说不清的行为。
-      final a = await announce(
-        <Detection>[_det(_binP0Id, score: kMinSpeakScore)],
-      );
+      final a = await announce(<Detection>[
+        _det(_binP0Id, score: kMinSpeakScore),
+      ]);
       expect(a, isNotNull);
       expect(speaker.spoken, hasLength(1));
     });
@@ -199,7 +212,10 @@ void main() {
       final strict = Announcer(speaker: speaker, minSpeakScore: 0.99);
       expect(strict.onFrame(<Detection>[_det(_binP0Id, score: 0.95)]), isNull);
       final loose = Announcer(speaker: speaker, minSpeakScore: 0.10);
-      expect(loose.onFrame(<Detection>[_det(_binP0Id, score: 0.95)]), isNotNull);
+      expect(
+        loose.onFrame(<Detection>[_det(_binP0Id, score: 0.95)]),
+        isNotNull,
+      );
     });
   });
 
@@ -251,8 +267,7 @@ void main() {
       expect(a, isNotNull);
 
       while (announcer.isSpeaking) {
-        expect(announcer.beginTextBatch(), isFalse,
-            reason: '障礙物出聲期間招牌不得插嘴');
+        expect(announcer.beginTextBatch(), isFalse, reason: '障礙物出聲期間招牌不得插嘴');
         expect(announcer.enqueueText('麥當勞'), isFalse);
         await Future<void>.delayed(Duration.zero);
       }
@@ -276,8 +291,7 @@ void main() {
       await announcer.lastSpeech;
       announcer.endTextBatch();
 
-      expect(speaker.spoken,
-          <String>['招牌寫著麥當勞', '出口 EXIT', '往彩明商場']);
+      expect(speaker.spoken, <String>['招牌寫著麥當勞', '出口 EXIT', '往彩明商場']);
 
       // 整批唸完之後才進冷卻。
       expect(announcer.beginTextBatch(), isFalse);
@@ -296,8 +310,11 @@ void main() {
       speaker.spoken.clear();
 
       await announcer.lastSpeech; // 障礙物唸完
-      expect(announcer.beginTextBatch(), isTrue,
-          reason: '障礙物唸完就該輪到招牌，不該再等 5 秒');
+      expect(
+        announcer.beginTextBatch(),
+        isTrue,
+        reason: '障礙物唸完就該輪到招牌，不該再等 5 秒',
+      );
       expect(announcer.enqueueText('麥當勞'), isTrue);
     });
 
@@ -364,4 +381,3 @@ void main() {
     });
   });
 }
-

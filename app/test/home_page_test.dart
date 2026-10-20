@@ -7,6 +7,7 @@ import 'package:pathguide/l10n/app_locale.dart';
 import 'package:pathguide/tts/announcer.dart';
 import 'package:pathguide/ui/demo_page.dart';
 import 'package:pathguide/ui/home_page.dart';
+import 'package:pathguide/ui/navigation_page.dart';
 import 'package:pathguide/ui/read_text_page.dart';
 import 'package:pathguide/vision/detection.dart';
 import 'package:pathguide/vision/vision_session.dart';
@@ -79,12 +80,14 @@ class _FakeSource implements VisionSource {
 
   void emit(List<Detection> detections) {
     if (_c.isClosed) return;
-    _c.add(VisionFrame(
-      detections: detections,
-      inferenceMs: 100,
-      frameWidth: 1280,
-      frameHeight: 720,
-    ));
+    _c.add(
+      VisionFrame(
+        detections: detections,
+        inferenceMs: 100,
+        frameWidth: 1280,
+        frameHeight: 720,
+      ),
+    );
   }
 }
 
@@ -158,6 +161,45 @@ void main() {
       expect(find.byType(HomePage), findsOneWidget);
       expect(find.byType(ReadTextPage), findsNothing);
     });
+
+    testWidgets('點「開始引導」進入引導畫面，並可返回主畫面', (tester) async {
+      final session = VisionSession(
+        speaker: _FakeSpeaker(),
+        sourceFactory: () => _FakeSource(),
+      );
+      await pumpHome(tester, session: session);
+
+      await tester.tap(find.text('開始引導'));
+      await tester.pumpAndSettle();
+
+      expect(find.byType(DemoPage), findsOneWidget);
+      expect(find.text('返回'), findsOneWidget);
+
+      await tester.tap(find.text('返回'));
+      await tester.pumpAndSettle();
+      expect(find.byType(HomePage), findsOneWidget);
+      expect(find.byType(DemoPage), findsNothing);
+    });
+
+    testWidgets('可從引導畫面開啟 App 內目的地導航並返回', (tester) async {
+      final session = VisionSession(
+        speaker: _FakeSpeaker(),
+        sourceFactory: () => _FakeSource(),
+      );
+      await pumpHome(tester, session: session);
+      await tester.tap(find.text('開始引導'));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('目的地導航'));
+      await tester.pumpAndSettle();
+      expect(find.byType(NavigationPage), findsOneWidget);
+      expect(find.text('目的地'), findsOneWidget);
+
+      await tester.tap(find.byTooltip('返回'));
+      await tester.pumpAndSettle();
+      expect(find.byType(NavigationPage), findsNothing);
+      expect(find.byType(DemoPage), findsOneWidget);
+    });
   });
 
   group('兩個模式互斥', () {
@@ -168,9 +210,9 @@ void main() {
         speaker: speaker,
         sourceFactory: () => source,
       );
-      await tester.pumpWidget(MaterialApp(
-        home: ReadTextPage(session: session),
-      ));
+      await tester.pumpWidget(
+        MaterialApp(home: ReadTextPage(session: session)),
+      );
       await tester.pumpAndSettle();
 
       // 就算有障礙物進來，讀字模式也不該播報它們。
@@ -200,9 +242,9 @@ void main() {
       expect(source.initialized, 1);
 
       // 再進讀字模式：**不可以**重新初始化相機。
-      await tester.pumpWidget(MaterialApp(
-        home: ReadTextPage(session: session),
-      ));
+      await tester.pumpWidget(
+        MaterialApp(home: ReadTextPage(session: session)),
+      );
       await tester.pumpAndSettle();
 
       expect(source.initialized, 1, reason: '切模式不該重建相機（重啟要 1–2 秒）');
@@ -220,9 +262,7 @@ void main() {
         sourceFactory: () => source,
       );
 
-      await tester.pumpWidget(MaterialApp(
-        home: DemoPage(session: session),
-      ));
+      await tester.pumpWidget(MaterialApp(home: DemoPage(session: session)));
       await tester.pumpAndSettle();
       expect(source.initialized, 1);
 
@@ -230,8 +270,7 @@ void main() {
       await tester.tap(find.text('結束引導'));
       await tester.pumpAndSettle();
 
-      expect(source.disposed, 0,
-          reason: '結束引導只該退訂，不該把共用相機弄死');
+      expect(source.disposed, 0, reason: '結束引導只該退訂，不該把共用相機弄死');
       // 而且要能再啟動（相機還在）。
       await tester.tap(find.text('啟動引導'));
       await tester.pumpAndSettle();
@@ -246,9 +285,9 @@ void main() {
         speaker: speaker,
         sourceFactory: () => _FakeSource(),
       );
-      await tester.pumpWidget(MaterialApp(
-        home: ReadTextPage(session: session),
-      ));
+      await tester.pumpWidget(
+        MaterialApp(home: ReadTextPage(session: session)),
+      );
       await tester.pumpAndSettle();
 
       expect(speaker.spoken.join(' '), contains('讀字模式'));
@@ -259,9 +298,9 @@ void main() {
         speaker: _FakeSpeaker(),
         sourceFactory: () => _FakeSource(),
       );
-      await tester.pumpWidget(MaterialApp(
-        home: ReadTextPage(session: session),
-      ));
+      await tester.pumpWidget(
+        MaterialApp(home: ReadTextPage(session: session)),
+      );
       await tester.pumpAndSettle();
 
       expect(find.text('再讀一次'), findsOneWidget);
@@ -273,9 +312,9 @@ void main() {
         speaker: speaker,
         sourceFactory: () => _FailingSource(),
       );
-      await tester.pumpWidget(MaterialApp(
-        home: ReadTextPage(session: session),
-      ));
+      await tester.pumpWidget(
+        MaterialApp(home: ReadTextPage(session: session)),
+      );
       await tester.pumpAndSettle();
 
       expect(speaker.spoken.join(' '), contains('沒有相機'));
@@ -300,11 +339,8 @@ class _FailingSource implements VisionSource {
   Stream<VisionFrame> get frames => const Stream<VisionFrame>.empty();
 
   @override
-  Future<VisionSourceStatus> initialize() async => const VisionSourceStatus(
-        ok: false,
-        message: '沒有相機',
-        error: 'no camera',
-      );
+  Future<VisionSourceStatus> initialize() async =>
+      const VisionSourceStatus(ok: false, message: '沒有相機', error: 'no camera');
 
   @override
   Future<VisionDiagnostics?> diagnostics() async => null;
